@@ -87,7 +87,9 @@ class DBManager:
         
         self.insertion_columns = {
             'experiment_id': ['experiment_id', 'exp_id', 'id'],
-            'gene_name': ['gene_name', 'gene', 'genename', 'symbol', 'gene_symbol', 'ensembl_id', 'ensemblid', 'ensembl_gene_id'],
+            'gene_symbol':['symbol', 'gene_symbol'],
+            'ensembl_id':['ensembl_id', 'ensemblid', 'ensembl_gene_id', 'gene_id'],
+            'gene_name': ['gene_name', 'gene', 'genename'],
             'log2fc': ['log2fc', 'log2foldchange', 'log2fold'],
             'logCPM': ['logcpm', 'basemean', 'logcpm'],
             'pvalue': ['pvalue', 'p-value', 'p_value'],
@@ -154,6 +156,8 @@ class DBManager:
                 return f'{actual_column} ILIKE ?', f'%{value}%'
             if operator is None:
                 return f"{actual_column} = ?", value
+            if actual_column=='date':
+                value=str(pd.to_datetime(value).strftime('%Y-%m-%d'))
 
             if operator not in operators:
                 raise ValueError(f"Invalid operator '{operator}' for column '{filter_column}'.")
@@ -166,6 +170,7 @@ class DBManager:
             )
 
         # Use ->> to extract the top-level JSON field as text from other_info.
+        print(f'{filter_column} does not exist in {table}, querying JSON...')
         json_key = filter_column.replace("'", "''")
         json_expr = f"other_info ->> '{json_key}'"
 
@@ -204,7 +209,7 @@ class DBManager:
             df=pd.DataFrame(df)
         elif os.path.isfile(df):
             df=self.preprocess_df(df, 0)
-        sample_data = df[['gene_name', 'pvalue', 'log2fc']].head(100).to_string()
+        sample_data = df[['gene_symbol', 'pvalue', 'log2fc']].head(100).to_string()
     
         # Generate a unique string (hash) from that data
         return hashlib.md5(sample_data.encode()).hexdigest()
@@ -242,12 +247,34 @@ class DBManager:
         flat_map = {v.lower(): k for k, variants in self.insertion_columns.items() for v in variants}
         rename_dict = {col: flat_map[col.lower()] for col in info.columns if col.lower() in flat_map}
         info.rename(columns=rename_dict, inplace=True)
+
+        if 'ensembl_id' in info.columns and 'gene_symbol' not in info.columns:
+            info['gene_symbol'] = None
+        if 'gene_symbol' in info.columns and 'ensembl_id' not in info.columns:
+            info['ensembl_id'] = None
+
+
+        if 'gene_name' in info.columns:
+            if info['ensembl_id'].notnull().any(): # ensembl_id already exists
+                info['gene_symbol'] = info['gene_name']
+            elif info['gene_symbol'].notnull().any(): # gene_symbol already exists
+                info['ensembl_id'] = info['gene_name']
+            else:
+       
+                sample = str(info['gene_name'].dropna().iloc[0]).strip()
+                if is_ensembl_regex(sample):
+                    info['ensembl_id'] = info['gene_name']
+                    info['gene_symbol'] = None
+                else:
+                    info['gene_symbol'] = info['gene_name']
+                    info['ensembl_id'] = None
+            
+        if 'gene_name' in info.columns:
+            info.drop(columns=['gene_name'], inplace=True)
         
         
         
-        
-        
-        expected_cols = ["gene_name", "log2fc", "logCPM", "pvalue", "padj", 'other_info']
+        expected_cols = ["log2fc", "logCPM", "pvalue", "padj", 'other_info', 'ensembl_id', 'gene_symbol']
         for col in expected_cols:
             if col not in info.columns:
                 info[col] = None
@@ -280,9 +307,9 @@ class DBManager:
         
         info['experiment_id'] = id
         
-        insert_df = info[['experiment_id', 'gene_name', 'log2fc', 'logCPM', 'pvalue', 'padj', 'other_info']]
         
-        return insert_df
+        
+        return info
 
     
 
@@ -333,27 +360,44 @@ class DBManager:
 
     def insert_gene_results(self, insert_df):
         
-        self.conn.execute(f'''
+        self.conn.execute('''
         INSERT INTO gene_results 
         (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, other_info) 
     
-        SELECT DISTINCT ON (df.experiment_id, df.gene_name)
-        df.experiment_id, 
-        -- Use the official symbol if found, otherwise keep the input name
-        COALESCE(ref.symbol, df.gene_name) as gene_symbol, 
+        SELECT DISTINCT ON (df.experiment_id, COALESCE(df.gene_symbol, df.ensembl_id))
+            df.experiment_id, 
         
-        -- Use official Ensembl if found, or input if it looks like an ENSG ID
-        COALESCE(ref.ensembl_id, CASE WHEN df.gene_name LIKE 'ENSG%' THEN df.gene_name END) as ensembl_id,
+            -- 1. Grab the canonical symbol from the symbol match, or the ensembl match, or fallback to the input symbol
+            COALESCE(ref_sym.symbol, ref_ens.symbol, df.gene_symbol) as gene_symbol, 
         
-        df.log2fc, df.logCPM, df.pvalue, df.padj, df.other_info
+            -- 2. Grab the canonical ensembl_id from the ensembl match, or the symbol match, or fallback to the input ensembl_id
+            COALESCE(ref_ens.ensembl_id, ref_sym.ensembl_id, df.ensembl_id) as ensembl_id,
+        
+            df.log2fc, 
+            df.logCPM, 
+            df.pvalue, 
+            df.padj, 
+            df.other_info
+        
         FROM insert_df df
-        LEFT JOIN genes ref ON (
-        UPPER(TRIM(split_part(df.gene_name, '.', 1))) = UPPER(ref.ensembl_id) OR    
-        UPPER(df.gene_name) = UPPER(ref.symbol) OR 
-        list_contains(ref.alias_symbol, UPPER(df.gene_name)) OR
-        list_contains(ref.prev_symbol, UPPER(df.gene_name))
+    
+        -- JOIN 1: Try to resolve the user's gene_symbol column against official symbols, aliases, and past symbols
+        LEFT JOIN genes ref_sym ON (
+        UPPER(TRIM(df.gene_symbol)) = UPPER(ref_sym.symbol) OR 
+        list_contains(ref_sym.alias_symbol, UPPER(TRIM(df.gene_symbol))) OR
+        list_contains(ref_sym.prev_symbol, UPPER(TRIM(df.gene_symbol)))
         )
-        ORDER BY df.experiment_id, df.gene_name, ref.symbol NULLS LAST
+    
+        -- JOIN 2: Try to resolve the user's ensembl_id column (stripping versions like .1) against official Ensembl IDs
+        LEFT JOIN genes ref_ens ON (
+        UPPER(TRIM(split_part(df.ensembl_id, '.', 1))) = UPPER(ref_ens.ensembl_id)
+        )
+    
+        ORDER BY 
+            df.experiment_id, 
+            COALESCE(df.gene_symbol, df.ensembl_id), 
+            ref_sym.symbol NULLS LAST, 
+            ref_ens.ensembl_id NULLS LAST
         ''')
 
         self.conn.commit()
@@ -505,6 +549,7 @@ class DBManager:
                 f"DELETE FROM gene_results WHERE experiment_id IN (SELECT experiment_id FROM experimental_data{where_clause})",
                 params
             )
+            self.conn.commit()
             self.conn.execute(f"DELETE FROM experimental_data{where_clause}", params)
             self.conn.commit()
             print('deleted experiments and associated gene results')

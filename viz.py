@@ -3,6 +3,8 @@ from matplotlib import pyplot as plt
 from adjustText import adjust_text
 import pandas as pd
 import numpy as np
+from db_manager import DBManager
+import os
 
 def volcano_plot(df, padj=0.05, log2fc=1, plot_file=None, pvalue=None, significant_up='red', insignificant='grey', significant_down='blue', label=5):
     clean_headers = {
@@ -16,8 +18,11 @@ def volcano_plot(df, padj=0.05, log2fc=1, plot_file=None, pvalue=None, significa
         pass
     elif isinstance(df, list) and isinstance(df[0], dict):
         df=pd.DataFrame(df)
+    elif os.path.exists(os.path.abspath(df)):
+        with DBManager() as db:
+            df=db.preprocess_df(df, id=None)
     else:
-        print("Error: Input must be a DataFrame or a list of dictionaries.")
+        print("Error: Input must be a DataFrame or a list of dictionaries or a csv/tsv file path")
         return
     rename_dict={original: standard for original in df.columns for standard, variants in clean_headers.items() if original.lower() in variants}
 
@@ -29,7 +34,7 @@ def volcano_plot(df, padj=0.05, log2fc=1, plot_file=None, pvalue=None, significa
         value=padj
     df = df.rename(columns=rename_dict)
     df[column] = df[column].dropna()
-    df[column] = df[column].replace(0, 1e-300)
+    df[column] = df[column].replace(0, 1e-200)
     df['log2FoldChange'] = df['log2FoldChange'].dropna().replace(np.inf, 6).replace(-np.inf, -6)
     df['significant_up'] = (df[column] < value) & (df['log2FoldChange'] > log2fc)
     df['significant_down'] = (df[column] < value) & (df['log2FoldChange'] < -log2fc)
@@ -55,7 +60,10 @@ def volcano_plot(df, padj=0.05, log2fc=1, plot_file=None, pvalue=None, significa
         for _, row in top_genes.iterrows():
             x = row['log2FoldChange']
             y = -np.log10(row[column])
-            texts.append(plt.text(x, y, str(row['gene_name']), fontsize=8, weight='bold'))
+            if row['gene_symbol'] is not None:
+                texts.append(plt.text(x, y, str(row['gene_symbol']), fontsize=8, weight='bold'))
+            else:
+                texts.append(plt.text(x, y, str(row['ensembl_id']), fontsize=8, weight='bold'))
         adjust_text(texts, 
             # Repel from these coordinates
             x=x, y=y, 

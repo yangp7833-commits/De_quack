@@ -1,4 +1,4 @@
-gene_id,gene_symbol,chromosome,log2FoldChange,logCPM,pvalue,padj,baseMean,lfcSE,stat,AveExpr
+gene,gene_symbol,chromosome,log2FoldChange,logCPM,pvalue,padj,baseMean,lfcSE,stat,AveExpr
 ENSG00000141510,TP53,chr17,inf,12.45,0.0,0.0,1540.2,0.12,45.2,12.1
 ENSG00000139618,BRCA2,chr13,-2.45,8.12,4.2e-12,1.5e-10,432.1,0.21,-11.6,7.9
 ENSG00000012048,BRCA1,chr17,3.12,7.45,8.9e-15,6.2e-13,312.5,0.18,17.3,7.2
