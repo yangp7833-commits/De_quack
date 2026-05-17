@@ -1,0 +1,19 @@
+# --- DuckDB / Database Outputs ---
+# Ignore any local test databases you create
+*.duckdb
+data.txt
+
+# --- Python Junk ---
+# Ignore Python's automatic background calculation folders
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.egg-info/
+dist/
+build/
+
+# --- Operating System Junk ---
+.DS_Store
+Thumbs.db

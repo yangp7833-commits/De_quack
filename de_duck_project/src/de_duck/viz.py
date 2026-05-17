@@ -3,7 +3,7 @@ from matplotlib import pyplot as plt
 from adjustText import adjust_text
 import pandas as pd
 import numpy as np
-from db_manager import DBManager
+from core import de_duckling
 import os
 
 def volcano_plot(df, padj=0.05, log2fc=1, plot_file=None, pvalue=None, significant_up='red', insignificant='grey', significant_down='blue', label=5):
@@ -19,8 +19,7 @@ def volcano_plot(df, padj=0.05, log2fc=1, plot_file=None, pvalue=None, significa
     elif isinstance(df, list) and isinstance(df[0], dict):
         df=pd.DataFrame(df)
     elif os.path.exists(os.path.abspath(df)):
-        with DBManager() as db:
-            df=db.preprocess_df(df, id=None)
+        df=de_duckling().preprocess_df(df, id=None)
     else:
         print("Error: Input must be a DataFrame or a list of dictionaries or a csv/tsv file path")
         return

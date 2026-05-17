@@ -1,3 +1,0 @@
-tool,date,file,experiment_name,comparison_label,data_signature
-,2026-05-09,/workspaces/SPARTA-pipelining-SQL/data.txt,t,t,8a086888f27ae7ac3f9f4706bb77879e
-,2026-05-09,/workspaces/SPARTA-pipelining-SQL/data.txt,test,test,8a086888f27ae7ac3f9f4706bb77879e

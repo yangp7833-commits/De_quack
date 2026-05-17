@@ -28,10 +28,23 @@ import hashlib
 import sys
 import difflib
 
-class DBManager:
+class de_duckling:
     def __init__(self, db_path='SQL.duckdb'):
         self.db_path = db_path
         self.conn = None
+        self.insertion_columns = {
+            'experiment_id': ['experiment_id', 'exp_id', 'id'],
+            'gene_symbol':['symbol', 'gene_symbol'],
+            'ensembl_id':['ensembl_id', 'ensemblid', 'ensembl_gene_id', 'gene_id'],
+            'gene_name': ['gene_name', 'gene', 'genename'],
+            'log2fc': ['log2fc', 'log2foldchange', 'log2fold'],
+            'logCPM': ['logcpm', 'basemean', 'logcpm'],
+            'pvalue': ['pvalue', 'p-value', 'p_value'],
+            'padj': ['padj', 'fdr', 'false_discovery_rate'],
+            'other_info': ['other_info', 'extra_info', 'json_info'],
+            
+        }
+        
         
     def __enter__(self):
         self.conn = duckdb.connect(self.db_path)
@@ -85,18 +98,7 @@ class DBManager:
         self.gene_columns = self.conn.execute("SELECT * FROM information_schema.columns WHERE table_name='gene_results'").fetchall()
         self.experiment_columns = self.conn.execute("SELECT * FROM information_schema.columns WHERE table_name='experimental_data'").fetchall()
         
-        self.insertion_columns = {
-            'experiment_id': ['experiment_id', 'exp_id', 'id'],
-            'gene_symbol':['symbol', 'gene_symbol'],
-            'ensembl_id':['ensembl_id', 'ensemblid', 'ensembl_gene_id', 'gene_id'],
-            'gene_name': ['gene_name', 'gene', 'genename'],
-            'log2fc': ['log2fc', 'log2foldchange', 'log2fold'],
-            'logCPM': ['logcpm', 'basemean', 'logcpm'],
-            'pvalue': ['pvalue', 'p-value', 'p_value'],
-            'padj': ['padj', 'fdr', 'false_discovery_rate'],
-            'other_info': ['other_info', 'extra_info', 'json_info'],
-            
-        }
+        
         return self
     
     def __exit__(self, exc_type, exc_value, traceback):
@@ -200,15 +202,18 @@ class DBManager:
                     return pd.to_datetime(path.stat().st_mtime, unit='s').strftime('%Y-%m-%d'), file_path
         else:
             file_path='dataframe'
-            return pd.datetime.now().strftime('%Y-%m-%d'), file_path
+            return pd.Timestamp.now().strftime('%Y-%m-%d'), file_path
     
     def get_data_signature(self, df):
         if isinstance(df, pd.DataFrame):
             pass
         elif isinstance(df, list) and isinstance(df[0], dict):
             df=pd.DataFrame(df)
-        elif os.path.isfile(df):
+        elif os.path.exists(os.path.abspath(df)):
+            print(1)
             df=self.preprocess_df(df, 0)
+        else:
+            raise ValueError(f'df must be a dataframe, csv path file, or dataframe, not {type(df)}')
         sample_data = df[['gene_symbol', 'pvalue', 'log2fc']].head(100).to_string()
     
         # Generate a unique string (hash) from that data
