@@ -184,7 +184,7 @@ class de_duckling:
 
         # For numeric comparisons, CAST the extracted text to DOUBLE
         if operator in ('gt', 'lt', 'gte', 'lte'):
-            return f"CAST(({json_expr} AS DOUBLE) {operators[operator]}) ?", value
+            return f"CAST({json_expr} AS DOUBLE) {operators[operator]} ?", value
 
         raise ValueError(
             f"JSON filtering only supports equality, inequality, and numeric comparisons for '{filter_column}'."
@@ -268,7 +268,7 @@ class de_duckling:
             else:
        
                 sample = str(info['gene_name'].dropna().iloc[0]).strip()
-                is_ensembl_regex_regex=re.match('^ENS')
+                is_ensembl_regex=re.match('^ENS')
                 if is_ensembl_regex(sample):
                     info['ensembl_id'] = info['gene_name']
                     info['gene_symbol'] = None

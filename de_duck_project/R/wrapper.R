@@ -162,6 +162,7 @@ DeDuck <- R6::R6Class(
 de_duck <- function(python_path = NULL, use_condaenv = NULL, use_virtualenv = NULL) {
   DeDuck$new(
     python_path = python_path,
+    db_path = db_path,
     use_condaenv = use_condaenv,
     use_virtualenv = use_virtualenv
   )
