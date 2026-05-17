@@ -152,10 +152,10 @@ DeDuck <- R6::R6Class(
     
     # Garbage collection guard to unlock DuckDB automatically
     finalize = function() {
-      self$close()
+    tryCatch({
+    self$close()
+    }, error = function(e) NULL)
     }
-    )
-    )
 
 # Convenience constructor for R users
 de_duck <- function(python_path = NULL, db_path = "SQL.duckdb", use_condaenv = NULL, use_virtualenv = NULL) {

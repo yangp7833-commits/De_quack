@@ -29,7 +29,7 @@ pip install de_duck[excel]
 ### Python
 
 ```python
-from de_duck import de_duckling
+from de_duck import de_duckling, volcano_plot
 
 with de_duckling('results.duckdb') as db:
     db.initialize_gene_table('human')
@@ -37,17 +37,20 @@ with de_duckling('results.duckdb') as db:
     results = db.query('gene_results', padj__lt=0.05)
     print(results)
     
-    # Generate volcano plot
-    db.volcano_plot(results, padj=0.05, log2fc=1, plot_file='volcano.png')
+# Generate volcano plot
+volcano_plot(results, padj=0.05, log2fc=1, plot_file='volcano.png')
 ```
 
 ### R
 
 ```r
-source('de_duck_project/R/wrapper.R')
+# Find and source the wrapper directly from the pip installation directory
+py_pkg_path <- dirname(reticulate::import("de_duck")$`__file__`)
+source(file.path(py_pkg_path, "wrapper.R"))
 
-duck <- de_duck()
-duck$connect('results.duckdb')
+# Initialize
+duck <- de_duck(db_path = "results.duckdb")
+duck$connect()
 duck$initialize_gene_table('human')
 duck$insert_to_database('data.txt')
 results <- duck$query('gene_results', padj__lt=0.05)
@@ -62,6 +65,15 @@ duck$close()
 - **experimental_data**: Metadata about DE analysis experiments
 - **gene_results**: Individual gene-level results with statistics
 - **genes**: Reference gene annotations (human, etc.)
+
+### Advanced Querying & JSON Fallback
+DeDuck supports intuitive field modifiers (`__lt`, `__gt`, `__lte`, `__gte`, `__ne`). If a metric isn't a native column in the database, DeDuck automatically queries it out of custom nested JSON metadata dynamically:
+
+```python
+# Regular column filtering + automatic nested JSON key metadata extraction
+with de_duckling as db:
+    results = db.query('gene_results', padj__lt=0.05, custom_biotype__ne='pseudogene')
+```
 
 ## License
 
