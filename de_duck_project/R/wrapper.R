@@ -11,39 +11,33 @@ if (!requireNamespace("R6", quietly = TRUE)) {
 }
 
 resolve_de_duck_path <- function(python_path = NULL) {
+  # 1. If the user explicitly provided a path, use it.
   if (!is.null(python_path)) {
-    candidate <- normalizePath(python_path, mustWork = FALSE)
-    if (file.exists(file.path(candidate, "core.py"))) {
-      return(candidate)
-    }
-    if (file.exists(file.path(candidate, "de_duck", "core.py"))) {
-      return(normalizePath(file.path(candidate, "de_duck"), mustWork = TRUE))
-    }
-    stop(sprintf(
-      "Could not find core.py under python_path='%s'. Set python_path to the directory containing core.py or the de_duck package root.",
-      python_path
-    ))
+    return(normalizePath(python_path, mustWork = TRUE))
   }
-
-  candidates <- c(
-    file.path(getwd(), "de_duck_project", "src", "de_duck"),
-    file.path(getwd(), "src", "de_duck"),
-    file.path(getwd(), "de_duck_project", "src"),
-    file.path(getwd(), "src")
+  
+  # 2. Check if the library is installed in the current Python environment via pip
+  if (reticulate::py_module_available("de_duck")) {
+    py_env <- reticulate::import("de_duck")
+    # This automatically finds the real pip installation directory!
+    pip_path <- dirname(py_env$`__file__`)
+    return(normalizePath(pip_path, mustWork = TRUE))
+  }
+  
+  # 3. Fallback for local development or uninstalled source code
+  local_candidates <- c(
+    file.path(getwd(), "de_duck"),
+    file.path(getwd(), "de_duck_project", "de_duck"),
+    getwd()
   )
-
-  for (candidate in candidates) {
+  
+  for (candidate in local_candidates) {
     if (file.exists(file.path(candidate, "core.py"))) {
       return(normalizePath(candidate, mustWork = TRUE))
     }
-    if (file.exists(file.path(candidate, "de_duck", "core.py"))) {
-      return(normalizePath(file.path(candidate, "de_duck"), mustWork = TRUE))
-    }
   }
-
-  stop(
-    "Could not locate the de_duck Python source. Try setting python_path to the directory containing core.py or the de_duck package root."
-  )
+  
+  stop("de_duck Python module not found. Please run 'pip install de_duck' or provide python_path.")
 }
 
 load_de_duck_modules <- function(python_path = NULL) {
@@ -61,10 +55,11 @@ DeDuck <- R6::R6Class(
     py_viz = NULL,
     py_db = NULL,
     python_path = NULL,
+    db_path = NULL,
 
     initialize = function(python_path = NULL, db_path = "SQL.duckdb", use_condaenv = NULL, use_virtualenv = NULL) {
       self$python_path <- python_path
-      self$db_path <- db_path 
+      self$db_path <- db_path
       if (!is.null(use_condaenv)) {
         reticulate::use_condaenv(use_condaenv, required = TRUE)
       }
@@ -153,13 +148,17 @@ DeDuck <- R6::R6Class(
         label = label
       )
       result
+    },
+    
+    # Garbage collection guard to unlock DuckDB automatically
+    finalize = function() {
+      self$close()
     }
-  )
-)
+    )
+    )
 
 # Convenience constructor for R users
-# python_path should point to the directory containing core.py.
-de_duck <- function(python_path = NULL, use_condaenv = NULL, use_virtualenv = NULL) {
+de_duck <- function(python_path = NULL, db_path = "SQL.duckdb", use_condaenv = NULL, use_virtualenv = NULL) {
   DeDuck$new(
     python_path = python_path,
     db_path = db_path,

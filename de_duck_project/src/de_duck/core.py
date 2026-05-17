@@ -1,7 +1,8 @@
-#!/home/codespace/.python/current/bin/python3
 """
-DBManager: small wrapper around a DuckDB file used to store and query
-experimental and gene result data. Key behaviors:
+de_duckling: Database manager for differential expression analysis data.
+
+Small wrapper around a DuckDB file used to store and query experimental and
+gene result data. Key behaviors:
 
 - Creates and manages tables (`experimental_data`, `gene_results`, `genes`).
 - Provides helper methods to ingest and normalize incoming dataframes.
@@ -268,8 +269,8 @@ class de_duckling:
             else:
        
                 sample = str(info['gene_name'].dropna().iloc[0]).strip()
-                is_ensembl_regex=re.match('^ENS')
-                if is_ensembl_regex(sample):
+                
+                if re.match('^ENS',sample):
                     info['ensembl_id'] = info['gene_name']
                     info['gene_symbol'] = None
                 else:
@@ -324,15 +325,22 @@ class de_duckling:
 
 
     def initialize_gene_table(self, species):
-
         if species=='human':
             temp_file='human_genes.tsv'
             url='https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt'
             urllib.request.urlretrieve(url, temp_file)
             
-            self.conn.execute('''INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
-            SELECT symbol, CAST(regexp_replace(hgnc_id, '^hgnc:', '', 'i') AS INTEGER) AS id, 
-            ensembl_gene_id, string_split(UPPER(alias_symbol), '|') as alias_symbol, string_split(UPPER(prev_symbol), '|') as prev_symbol, 'human' as species FROM read_csv_auto(?)''', (temp_file,))
+            self.conn.execute('''
+                INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
+                SELECT 
+                    csv_data.symbol, 
+                    CAST(regexp_replace(csv_data.hgnc_id, '^hgnc:', '', 'i') AS INTEGER) AS id, 
+                    csv_data.ensembl_gene_id, 
+                    string_split(UPPER(COALESCE(csv_data.alias_symbol, '')), '|') as alias_symbol, 
+                    string_split(UPPER(COALESCE(csv_data.prev_symbol, '')), '|') as prev_symbol, 
+                    'human' as species 
+                FROM read_csv_auto(?) AS csv_data
+            ''', (temp_file,))
             os.remove(temp_file)
 
     def create_experiment(self, tool, date, file_path, data_signature, experiment_name=None, comparison_label=None):
@@ -346,14 +354,7 @@ class de_duckling:
             (data_signature,)
             ).fetchall()
         if len(duplicate_ids)>0:
-            print(f'Warning: this data is identical to the data from experiment id:{duplicate_ids[0][0]}')
-            override=input('Would you still like to proceed? y/n')
-            if override=='y' or override=='Y':
-                print('warning overwritten')
-                pass
-            else:
-                print('insert canceled')
-                sys.exit()
+            raise ValueError(f'data is identical to data in experiment id:{duplicate_ids[0][0]}')
 
 
         
