@@ -32,6 +32,11 @@ from .exceptions import ProcessingError, DuplicateExperimentError, DuplicateGene
 
 class de_quackling:
     def __init__(self, db_path='SQL.duckdb'):
+        """Initialize a de_quackling manager for a DuckDB-backed differential expression store.
+
+        Args:
+            db_path: path to the DuckDB file to use or create.
+        """
         self.db_path = db_path
         self.conn = None
         self.insertion_columns = {
@@ -49,6 +54,12 @@ class de_quackling:
         
         
     def __enter__(self):
+        """Open the DuckDB connection and initialize required tables.
+
+        This method is used by the context manager protocol and creates the
+        core schema (`experimental_data`, `gene_results`, `genes`) plus indexes
+        and sequences if they do not already exist.
+        """
         self.conn = duckdb.connect(self.db_path)
 
         # Maintain a sequence for experiment primary keys.
@@ -104,10 +115,12 @@ class de_quackling:
         return self
     
     def __exit__(self, exc_type, exc_value, traceback):
+        """Close the DuckDB connection when leaving the context manager."""
         if self.conn:
             self.conn.close()
     
     def connect(self):
+        """Ensure the database connection is open and return the manager instance."""
         if not self.conn:
             self.__enter__()
         return self
@@ -326,6 +339,11 @@ class de_quackling:
 
 
     def initialize_gene_table(self, species):
+        """Load species-specific reference gene annotation data into the database.
+
+        Currently supports `human` by downloading HGNC gene metadata and
+        populating the `genes` reference table for symbol and Ensembl matching.
+        """
         if species == 'human':
             url = 'https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt'
 
@@ -412,6 +430,20 @@ class de_quackling:
         self.conn.commit()
         
     def insert_to_database(self, info, tool=None, date=None, file_path=None, experiment_name=None, comparison_label=None):
+        """Normalize and ingest differential expression results into DuckDB.
+
+        Args:
+            info: pandas DataFrame, list of dicts, or path to a CSV/TSV file.
+            tool: optional source tool name.
+            date: optional experiment date; auto-detected from file path or current time.
+            file_path: optional source file path.
+            experiment_name: human-readable experiment name.
+            comparison_label: label for the comparison being stored.
+
+        The method validates required metadata, calculates a data signature,
+        prevents duplicate experiments, and loads normalized gene results into
+        `gene_results` with canonical symbol/Ensembl mapping.
+        """
 
         if experiment_name is None or comparison_label is None:
             raise ProcessingError('You must include an experiment name and comparison label for your experiment!')
@@ -425,6 +457,7 @@ class de_quackling:
         
 
     def close(self):
+        """Close the active DuckDB connection and reset internal state."""
         if self.conn:
             self.conn.close()
             self.conn = None
@@ -502,8 +535,8 @@ class de_quackling:
         """Delete rows from `gene_results` matching provided filters.
 
         Filters use the same syntax as `query()`. This method resolves filters
-        into SQL WHERE clauses and executes a DELETE. It will raise if no
-        filters are provided to avoid accidental full-table deletes.
+        into SQL WHERE clauses and executes a DELETE. It raises if no filters
+        are provided to avoid accidental full-table deletion.
         """
         actual_columns = [col[3] for col in self.gene_columns]
         if not filters:
@@ -533,10 +566,11 @@ class de_quackling:
        
 
     def delete_experiments(self, **filters):
-        """Delete experiments (and associated gene_results) matching filters.
+        """Delete experiments and their associated gene results.
 
         Resolves filters into a WHERE clause against `experimental_data` and
-        deletes matching experiments and any gene_results referencing them.
+        deletes matching experiments as well as all linked entries in
+        `gene_results`.
         """
         actual_columns = [col[3] for col in self.experiment_columns]
         if len(filters) == 0:
