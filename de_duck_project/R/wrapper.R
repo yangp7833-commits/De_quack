@@ -62,8 +62,9 @@ DeDuck <- R6::R6Class(
     py_db = NULL,
     python_path = NULL,
 
-    initialize = function(python_path = NULL, use_condaenv = NULL, use_virtualenv = NULL) {
+    initialize = function(python_path = NULL, db_path = "SQL.duckdb", use_condaenv = NULL, use_virtualenv = NULL) {
       self$python_path <- python_path
+      self$db_path <- db_path 
       if (!is.null(use_condaenv)) {
         reticulate::use_condaenv(use_condaenv, required = TRUE)
       }
@@ -76,8 +77,10 @@ DeDuck <- R6::R6Class(
       invisible(self)
     },
 
-    connect = function(db_path = "SQL.duckdb") {
-      self$py_db <- self$py_core$de_duckling(db_path)
+    connect = function(db_path = NULL) {
+      target_path <- if (is.null(db_path)) self$db_path else db_path
+      
+      self$py_db <- self$py_core$de_duckling(db_path = target_path)
       self$py_db$connect()
       invisible(self)
     },
@@ -127,7 +130,7 @@ DeDuck <- R6::R6Class(
 
     initialize_gene_table = function(species = "human") {
       stopifnot(!is.null(self$py_db))
-      self$py_db$initalize_gene_table(species)
+      self$py_db$initialize_gene_table(species)
       invisible(TRUE)
     },
 

@@ -106,7 +106,8 @@ class de_duckling:
             self.conn.close()
     
     def connect(self):
-        self.__enter__()
+        if not self.conn:
+            self.__enter__()
 
     def _split_filter_key(self, filter_key):
         # Parse the optional operator suffix from filter keys like `pvalue__gt`.
@@ -183,7 +184,7 @@ class de_duckling:
 
         # For numeric comparisons, CAST the extracted text to DOUBLE
         if operator in ('gt', 'lt', 'gte', 'lte'):
-            return f"CAST(({json_expr}) {operators[operator]} ?", value
+            return f"CAST(({json_expr} AS DOUBLE) {operators[operator]}) ?", value
 
         raise ValueError(
             f"JSON filtering only supports equality, inequality, and numeric comparisons for '{filter_column}'."
@@ -267,6 +268,7 @@ class de_duckling:
             else:
        
                 sample = str(info['gene_name'].dropna().iloc[0]).strip()
+                is_ensembl_regex_regex=re.match('^ENS')
                 if is_ensembl_regex(sample):
                     info['ensembl_id'] = info['gene_name']
                     info['gene_symbol'] = None
@@ -321,7 +323,7 @@ class de_duckling:
 
 
 
-    def initalize_gene_table(self, species):
+    def initialize_gene_table(self, species):
 
         if species=='human':
             temp_file='human_genes.tsv'
