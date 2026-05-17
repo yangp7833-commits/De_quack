@@ -23,11 +23,12 @@ import re
 import pandas as pd
 import os
 import json
-import urllib.request
 from pathlib import Path
 import hashlib
 import sys
 import difflib
+from .exceptions import ProcessingError, DuplicateExperimentError, DuplicateGeneTableError
+from .exceptions import ProcessingError, DuplicateExperimentError, DuplicateGeneTableError
 
 class de_quackling:
     def __init__(self, db_path='SQL.duckdb'):
@@ -109,6 +110,7 @@ class de_quackling:
     def connect(self):
         if not self.conn:
             self.__enter__()
+        return self
 
     def _split_filter_key(self, filter_key):
         # Parse the optional operator suffix from filter keys like `pvalue__gt`.
@@ -128,13 +130,13 @@ class de_quackling:
         close_matches = difflib.get_close_matches(filter_column.lower(), lower_columns, n=1, cutoff=0.8)
         if close_matches:
             suggested = actual_columns[lower_columns.index(close_matches[0])]
-            raise ValueError(f"Column '{filter_column}' does not exist in table '{table}'. Did you mean '{suggested}'?")
+            raise ProcessingError(f"Column '{filter_column}' does not exist in table '{table}'. Did you mean '{suggested}'?")
 
         # Allow fallback to other_info JSON if the requested field is not a native column.
         if 'other_info' in actual_columns:
             return None
 
-        raise ValueError(
+        raise ProcessingError(
             f"Column '{filter_column}' does not exist in table '{table}'. Available columns: {', '.join(actual_columns)}"
         )
 
@@ -164,12 +166,12 @@ class de_quackling:
                 value=str(pd.to_datetime(value).strftime('%Y-%m-%d'))
 
             if operator not in operators:
-                raise ValueError(f"Invalid operator '{operator}' for column '{filter_column}'.")
+                raise ProcessingError(f"Invalid operator '{operator}' for column '{filter_column}'.")
 
             return f"{actual_column} {operators[operator]} ?", value
 
         if 'other_info' not in actual_columns:
-            raise ValueError(
+            raise ProcessingError(
                 f"Column '{filter_column}' does not exist in table '{table}', and no JSON fallback is available."
             )
 
@@ -187,11 +189,11 @@ class de_quackling:
         if operator in ('gt', 'lt', 'gte', 'lte'):
             return f"CAST({json_expr} AS DOUBLE) {operators[operator]} ?", value
 
-        raise ValueError(
+        raise ProcessingError(
             f"JSON filtering only supports equality, inequality, and numeric comparisons for '{filter_column}'."
         )
 
-    def find_date_and_file(self, info):
+    def _find_date_and_file(self, info):
         if os.path.isfile(os.path.abspath(info)):
             date_pattern = re.compile(r'(\d{4}-\d{2}-\d{2})') 
             match = date_pattern.search(info) # first tries to find the date using regex on the file name
@@ -206,22 +208,21 @@ class de_quackling:
             file_path='dataframe'
             return pd.Timestamp.now().strftime('%Y-%m-%d'), file_path
     
-    def get_data_signature(self, df):
+    def _get_data_signature(self, df):
         if isinstance(df, pd.DataFrame):
             pass
         elif isinstance(df, list) and isinstance(df[0], dict):
             df=pd.DataFrame(df)
         elif os.path.exists(os.path.abspath(df)):
-            print(1)
-            df=self.preprocess_df(df, 0)
+            df=self._preprocess_df(df, 0)
         else:
-            raise ValueError(f'df must be a dataframe, csv path file, or dataframe, not {type(df)}')
+            raise ProcessingError(f'df must be a pandas DataFrame, a list of dictionaries, or a file path, not {type(df)}')
         sample_data = df[['gene_symbol', 'pvalue', 'log2fc']].head(100).to_string()
     
         # Generate a unique string (hash) from that data
         return hashlib.md5(sample_data.encode()).hexdigest()
 
-    def preprocess_df(self, info, id):
+    def _preprocess_df(self, info, id):
         """Normalize incoming data into a dataframe suitable for insertion.
 
         Accepts a DataFrame, list-of-dicts, or a filepath. Normalization steps:
@@ -241,13 +242,13 @@ class de_quackling:
             elif isinstance(info[0], pd.Series):
                 info = pd.DataFrame(info)
             else:
-                raise ValueError(f"Info list contains unsupported element type {type(info[0])}.")
+                raise ProcessingError(f"Info list contains unsupported element type {type(info[0])}.")
         elif isinstance(info, pd.DataFrame):
             info = info.copy()
         elif os.path.isfile(os.path.abspath(info)):
             info = pd.read_csv(os.path.abspath(info), sep=None, engine='python')
         else:
-            raise ValueError(f'Info is in an unexpected format {type(info)} please provide a pandas DataFrame, a list of dictionaries, or a file path to a CSV or TSV file.')
+            raise ProcessingError(f'Info is in an unexpected format {type(info)}; please provide a pandas DataFrame, a list of dictionaries, or a file path to a CSV or TSV file.')
         
         # Map common source column variants to canonical insert columns.
         rename_map = {}
@@ -325,36 +326,36 @@ class de_quackling:
 
 
     def initialize_gene_table(self, species):
-        if species=='human':
-            temp_file='human_genes.tsv'
-            url='https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt'
-            urllib.request.urlretrieve(url, temp_file)
-            
+        if species == 'human':
+            url = 'https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt'
+
+        try:
             self.conn.execute('''
-                INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
-                SELECT 
-                    csv_data.symbol, 
-                    CAST(regexp_replace(csv_data.hgnc_id, '^hgnc:', '', 'i') AS INTEGER) AS id, 
-                    csv_data.ensembl_gene_id, 
-                    string_split(UPPER(COALESCE(csv_data.alias_symbol, '')), '|') as alias_symbol, 
-                    string_split(UPPER(COALESCE(csv_data.prev_symbol, '')), '|') as prev_symbol, 
-                    'human' as species 
-                FROM read_csv_auto(?) AS csv_data
-            ''', (temp_file,))
-            os.remove(temp_file)
+            INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
+            SELECT 
+                csv_data.symbol, 
+                CAST(regexp_replace(csv_data.hgnc_id, '^hgnc:', '', 'i') AS INTEGER) AS id, 
+                csv_data.ensembl_gene_id, 
+                string_split(UPPER(COALESCE(csv_data.alias_symbol, '')), '|') as alias_symbol, 
+                string_split(UPPER(COALESCE(csv_data.prev_symbol, '')), '|') as prev_symbol, 
+                'human' as species 
+            FROM read_csv_auto(?) AS csv_data
+            ''', (url,))
+        except duckdb.ConstraintException as e:
+            raise DuplicateGeneTableError(
+                'Gene reference data appears to have already been loaded or the gene table has duplicate entries.'
+            ) from e
 
-    def create_experiment(self, tool, date, file_path, data_signature, experiment_name=None, comparison_label=None):
-        if experiment_name is None:
-            experiment_name = input('Enter a name for this experiment: ')
-        if comparison_label is None:
-            comparison_label = input('Enter a comparison label for this experiment: ')
-
+    def _create_experiment(self, tool, date, file_path, data_signature, experiment_name=None, comparison_label=None):
+        
         duplicate_ids=results = self.conn.execute(
             "SELECT experiment_id FROM experimental_data WHERE data_signature = ?", 
             (data_signature,)
             ).fetchall()
-        if len(duplicate_ids)>0:
-            raise ValueError(f'data is identical to data in experiment id:{duplicate_ids[0][0]}')
+        if len(duplicate_ids) > 0:
+            raise DuplicateExperimentError(
+                f'Data is identical to data in experiment id: {duplicate_ids[0][0]}. Duplicate experiments are not allowed.'
+            )
 
 
         
@@ -366,7 +367,7 @@ class de_quackling:
         
         return result[0][0]
 
-    def insert_gene_results(self, insert_df):
+    def _insert_gene_results(self, insert_df):
         
         self.conn.execute('''
         INSERT INTO gene_results 
@@ -411,14 +412,16 @@ class de_quackling:
         self.conn.commit()
         
     def insert_to_database(self, info, tool=None, date=None, file_path=None, experiment_name=None, comparison_label=None):
-        
-        date, file_path = self.find_date_and_file(info)
+
+        if experiment_name is None or comparison_label is None:
+            raise ProcessingError('You must include an experiment name and comparison label for your experiment!')
+        date, file_path = self._find_date_and_file(info)
         if date:
             date = pd.to_datetime(date).strftime('%Y-%m-%d')
-        data_signature=self.get_data_signature(info)
-        id = self.create_experiment(tool, date, file_path, data_signature, experiment_name, comparison_label)
-        df = self.preprocess_df(info, id)
-        self.insert_gene_results(df)
+        data_signature=self._get_data_signature(info)
+        id = self._create_experiment(tool, date, file_path, data_signature, experiment_name, comparison_label)
+        df = self._preprocess_df(info, id)
+        self._insert_gene_results(df)
         
 
     def close(self):
@@ -438,7 +441,7 @@ class de_quackling:
         """
         table_names = [t[0] for t in self.tables]
         if table not in table_names:
-           raise ValueError(f"Table '{table}' does not exist in the database. Available tables: {', '.join(table_names)}")
+           raise ProcessingError(f"Table '{table}' does not exist in the database. Available tables: {', '.join(table_names)}")
 
         if table == 'gene_results':
             actual_columns = [col[3] for col in self.gene_columns]
@@ -504,7 +507,7 @@ class de_quackling:
         """
         actual_columns = [col[3] for col in self.gene_columns]
         if not filters:
-            raise ValueError("No filters provided. Don't delete everything by accident!")
+            raise ProcessingError("No filters provided. Don't delete everything by accident!")
 
         clauses = []
         params = []
@@ -537,7 +540,7 @@ class de_quackling:
         """
         actual_columns = [col[3] for col in self.experiment_columns]
         if len(filters) == 0:
-            raise ValueError("No filters provided for deletion.")
+            raise ProcessingError("No filters provided for deletion.")
 
         clauses = []
         params = []

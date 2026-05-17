@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "de_quack"
-version = "0.1.1"
+version = "0.1.2"
 description = "Python library for differential expression data storage and visualization using DuckDB."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-keywords = ["duckdb", "differential expression", "bioinformatics", "visualization", "data management"]
+keywords = ["duckdb", "differential expression", "bioinformatics", "visualization", "data management", "rnaseq"]
 authors = [
   { name = "yangp7833-commits" }
 ]
@@ -40,7 +40,7 @@ excel = ["openpyxl>=3.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["de_duck*"]
+include = ["de_quack*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.py"]

@@ -33,7 +33,7 @@ from de_quack import de_quackling, volcano_plot
 
 with de_quackling('results.duckdb') as db:
     db.initialize_gene_table('human')
-    db.insert_to_database('data.txt')
+    db.insert_to_database('data.txt', experiment_name='test', comparison_label='test')
     results = db.query('gene_results', padj__lt=0.05)
     print(results)
     
@@ -52,7 +52,7 @@ source(file.path(py_pkg_path, "wrapper.R"))
 duck <- de_quack(db_path = "results.duckdb")
 duck$connect()
 duck$initialize_gene_table('human')
-duck$insert_to_database('data.txt')
+duck$insert_to_database('data.txt', experiment_name = 'test', comparison_label = 'test')
 results <- duck$query('gene_results', padj__lt=0.05)
 duck$volcano_plot(results, padj=0.05, log2fc=1, plot_file='volcano.png')
 duck$close()
@@ -67,13 +67,14 @@ duck$close()
 - **genes**: Reference gene annotations (human, etc.)
 
 ### Advanced Querying & JSON Fallback
-DeDuck supports intuitive field modifiers (`__lt`, `__gt`, `__lte`, `__gte`, `__ne`). If a metric isn't a native column in the database, DeDuck automatically queries it out of custom nested JSON metadata dynamically:
+De_quack supports intuitive field modifiers (`__lt`, `__gt`, `__le`, `__ge`, `__ne`). If a metric isn't a native column in the database, DeDuck automatically queries it out of custom nested JSON metadata dynamically:
 
 ```python
 # Regular column filtering + automatic nested JSON key metadata extraction
 with de_quackling as db:
     results = db.query('gene_results', padj__lt=0.05, custom_biotype__ne='pseudogene')
 ```
+
 
 ## License
 

@@ -4,6 +4,11 @@ import pandas as pd
 import numpy as np
 import re
 import os
+from .exceptions import ProcessingError
+import warnings
+import logging
+from contextlib import redirect_stdout
+
 
 
 def _normalize_df_columns(df):
@@ -101,7 +106,7 @@ def volcano_plot(df, padj=0.05, log2fc=1, plot_file=None, pvalue=None, significa
     elif os.path.isfile(os.path.abspath(df)):
         df=pd.read_csv(df, sep=None, engine='Python')
     else:
-        raise ValueError("Input must be a pandas DataFrame or a non-empty list of dictionaries or a file path.")
+        raise ProcessingError("Input must be a pandas DataFrame or a non-empty list of dictionaries or a file path.")
     
     # Normalize column names to standard format
     df = _normalize_df_columns(df)
@@ -145,12 +150,21 @@ def volcano_plot(df, padj=0.05, log2fc=1, plot_file=None, pvalue=None, significa
                 texts.append(plt.text(x, y, gene_label, fontsize=8, weight='bold'))
         
         if texts:
-            adjust_text(texts, 
-                expand_points=(1.5, 1.5), 
-                expand_text=(1.2, 1.2),
-                arrowprops=dict(arrowstyle='-', color='black', lw=0.5),
-                autoalign='xy',
-                only_move={'points': 'xy', 'text': 'xy'})
+            with warnings.catch_warnings():
+                with redirect_stdout(open(os.devnull, 'w')):
+                    warnings.filterwarnings("ignore")
+                    adjust_text_logger = logging.getLogger('adjustText')
+                    current_level = adjust_text_logger.getEffectiveLevel()
+                    adjust_text_logger.setLevel(logging.ERROR)
+                    try:
+                        adjust_text(texts, 
+                        expand_points=(1.5, 1.5), 
+                        expand_text=(1.2, 1.2),
+                        arrowprops=dict(arrowstyle='-', color='black', lw=0.5),
+                        autoalign='xy',
+                        only_move={'points': 'xy', 'text': 'xy'})
+                    finally:
+                        adjust_text_logger.setLevel(current_level)
 
     if plot_file:
         plt.savefig(plot_file)
