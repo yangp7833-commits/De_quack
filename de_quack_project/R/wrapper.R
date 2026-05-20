@@ -88,9 +88,9 @@ DeDuck <- R6::R6Class(
       invisible(self)
     },
 
-    insert_to_database = function(info, tool = NULL, date = NULL, file_path = NULL, experiment_name = NULL, comparison_label = NULL) {
+    insgest = function(info, tool = NULL, date = NULL, file_path = NULL, experiment_name = NULL, comparison_label = NULL) {
       stopifnot(!is.null(self$py_db))
-      self$py_db$insert_to_database(
+      self$py_db$ingest(
         info,
         tool = if (is.null(tool)) NULL else tool,
         date = if (is.null(date)) NULL else date,

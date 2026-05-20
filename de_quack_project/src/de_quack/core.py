@@ -14,7 +14,7 @@ gene result data. Key behaviors:
 
 Workflow summary (high level):
 1. Open connection with `with DBManager() as db:` which creates tables/indexes.
-2. Use `insert_to_database()` to normalize and insert a DataFrame (preprocess_df).
+2. Use `ingest()` to normalize and insert a DataFrame (preprocess_df).
 3. `query()` and delete methods accept keyword filters, resolve them to
      concrete SQL clauses, and execute against DuckDB.
 """
@@ -28,7 +28,6 @@ import hashlib
 import sys
 import difflib
 from .exceptions import ProcessingError, DuplicateExperimentError, DuplicateGeneTableError
-from .exceptions import ProcessingError, DuplicateExperimentError, DuplicateGeneTableError
 
 class de_quackling:
     def __init__(self, db_path='SQL.duckdb'):
@@ -40,16 +39,29 @@ class de_quackling:
         self.db_path = db_path
         self.conn = None
         self.insertion_columns = {
-            'experiment_id': ['experiment_id', 'exp_id', 'id'],
-            'gene_symbol':['symbol', 'gene_symbol'],
-            'ensembl_id':['ensembl_id', 'ensemblid', 'ensembl_gene_id', 'gene_id'],
-            'gene_name': ['gene_name', 'gene', 'genename'],
-            'log2fc': ['log2fc', 'log2foldchange', 'log2fold'],
-            'logCPM': ['logcpm', 'basemean', 'logcpm'],
-            'pvalue': ['pvalue', 'p-value', 'p_value'],
-            'padj': ['padj', 'fdr', 'false_discovery_rate'],
-            'other_info': ['other_info', 'extra_info', 'json_info'],
-            
+        'gene_symbol': [
+            'gene_symbol', 'symbol', 'hgnc_symbol', 'genesymbol'
+        ],
+        'gene_name':['gene', 'gene_name', 'genename', 
+            'name'],
+        'ensembl_id': [
+            'ensembl_id', 'ensembl', 'gene_id', 'geneid', 'ensembl_gene_id', 
+            'target_id', 'feature_id'
+        ],
+        'pvalue': [
+        'pvalue', 'p_value', 'p.value', 'p-value', 'pval', 'p.val', 'p_val'
+        ],
+        'padj': [
+        'padj', 'p.adj', 'p_adj', 'p.adjusted', 'p_adjusted', 
+        'fdr', 'qval', 'qvalue', 'q-value', 'adj.p.val', 'adj.p.value'
+        ],
+        'log2fc': [
+            'log2foldchange', 'log2fc', 'log2_fc', 'log2.fc', 'logfc', 'log_fc', 'log.fc'
+            ],
+        'base_mean': [
+        'basemean', 'base_mean',  'aveexpr', 'tpm', 'fpkm'
+        ],
+        'logCPM':['logcpm', 'log_cpm', 'log.cpm']
         }
         
         
@@ -222,15 +234,9 @@ class de_quackling:
             return pd.Timestamp.now().strftime('%Y-%m-%d'), file_path
     
     def _get_data_signature(self, df):
-        if isinstance(df, pd.DataFrame):
-            pass
-        elif isinstance(df, list) and isinstance(df[0], dict):
-            df=pd.DataFrame(df)
-        elif os.path.exists(os.path.abspath(df)):
-            df=self._preprocess_df(df, 0)
-        else:
-            raise ProcessingError(f'df must be a pandas DataFrame, a list of dictionaries, or a file path, not {type(df)}')
-        sample_data = df[['gene_symbol', 'pvalue', 'log2fc']].head(100).to_string()
+       
+        df=self._preprocess_df(df, 0)
+        sample_data=df[['gene_symbol', 'log2fc', 'pvalue']].head(100).to_string()
     
         # Generate a unique string (hash) from that data
         return hashlib.md5(sample_data.encode()).hexdigest()
@@ -258,15 +264,18 @@ class de_quackling:
                 raise ProcessingError(f"Info list contains unsupported element type {type(info[0])}.")
         elif isinstance(info, pd.DataFrame):
             info = info.copy()
-        elif os.path.isfile(os.path.abspath(info)):
-            info = pd.read_csv(os.path.abspath(info), sep=None, engine='python')
+        elif isinstance(info, str):
+            if os.path.isfile(os.path.abspath(info)):
+                info = pd.read_csv(os.path.abspath(info), sep=None, engine='python')
+            else:
+                raise ProcessingError(f'file path {info} is not a valid file path/directory')
         else:
             raise ProcessingError(f'Info is in an unexpected format {type(info)}; please provide a pandas DataFrame, a list of dictionaries, or a file path to a CSV or TSV file.')
         
         # Map common source column variants to canonical insert columns.
         rename_map = {}
         flat_map = {v.lower(): k for k, variants in self.insertion_columns.items() for v in variants}
-        rename_dict = {col: flat_map[col.lower()] for col in info.columns if col.lower() in flat_map}
+        rename_dict = {col: flat_map[col.lower().strip()] for col in info.columns if col.lower().strip() in flat_map}
         info.rename(columns=rename_dict, inplace=True)
 
         if 'ensembl_id' in info.columns and 'gene_symbol' not in info.columns:
@@ -294,11 +303,18 @@ class de_quackling:
         if 'gene_name' in info.columns:
             info.drop(columns=['gene_name'], inplace=True)
         
+        if 'base_mean' in info.columns:
+            if 'logCPM' in info.columns:
+                info=info.drop('base_mean', axis=1)
+            else:
+                np_hidden = pd.core.computation.expressions.np
+                info['logCPM'] = np_hidden.log2(info['base_mean'] + 1).round(2)
+                info=info.drop('base_mean', axis=1)
         
         
         expected_cols = ["log2fc", "logCPM", "pvalue", "padj", 'other_info', 'ensembl_id', 'gene_symbol']
         for col in expected_cols:
-            if col not in info.columns:
+            if col not in info.columns and col != 'other_info':
                 info[col] = None
         
         extra_columns = [col for col in info.columns if col not in expected_cols and col != 'experiment_id']
@@ -310,27 +326,26 @@ class de_quackling:
 
             if 'other_info' in info.columns:
                 # Standardize existing `other_info` values so dictionaries merge cleanly.
-                existing_info = info['other_info'].apply(
-                lambda x: json.loads(x) if isinstance(x, str) else (x if isinstance(x, dict) else {})
-                )
+                existing_info = info['other_info'].to_dict()
         
                 # Merge old and new dictionaries efficiently using a list comprehension
-                info['other_info'] = [
+                merged_info = [
                 {**old, **new} if old else new 
                 for old, new in zip(existing_info, extra_data)
                 ]
+                info['other_info']=[json.dumps(row) for row in merged_info]
             else:
             # If it didn't exist, safe to just assign it directly
                 info['other_info'] = extra_data
+                info['other_info'] = [json.dumps(row) for row in extra_data]
             if 'other_info' not in info.columns:
                 info['other_info'] = None
+        elif 'other_info' not in info.columns:
+            info['other_info']=None
 
         
         
         info['experiment_id'] = id
-        
-        
-        
         return info
 
     
@@ -346,6 +361,8 @@ class de_quackling:
         """
         if species == 'human':
             url = 'https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt'
+        else:
+            raise ProcessingError(f"Unsupported species '{species}'. Only 'human' is currently supported.")
 
         try:
             self.conn.execute('''
@@ -365,7 +382,6 @@ class de_quackling:
             ) from e
 
     def _create_experiment(self, tool, date, file_path, data_signature, experiment_name=None, comparison_label=None):
-        
         duplicate_ids=results = self.conn.execute(
             "SELECT experiment_id FROM experimental_data WHERE data_signature = ?", 
             (data_signature,)
@@ -391,45 +407,38 @@ class de_quackling:
         INSERT INTO gene_results 
         (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, other_info) 
     
-        SELECT DISTINCT ON (df.experiment_id, COALESCE(df.gene_symbol, df.ensembl_id))
-            df.experiment_id, 
-        
-            -- 1. Grab the canonical symbol from the symbol match, or the ensembl match, or fallback to the input symbol
-            COALESCE(ref_sym.symbol, ref_ens.symbol, df.gene_symbol) as gene_symbol, 
-        
-            -- 2. Grab the canonical ensembl_id from the ensembl match, or the symbol match, or fallback to the input ensembl_id
+        SELECT 
+            df.experiment_id,
+            COALESCE(ref_sym.symbol, ref_ens.symbol, df.gene_symbol) as gene_symbol,
             COALESCE(ref_ens.ensembl_id, ref_sym.ensembl_id, df.ensembl_id) as ensembl_id,
-        
-            df.log2fc, 
-            df.logCPM, 
-            df.pvalue, 
-            df.padj, 
+            df.log2fc,
+            df.logCPM,
+            df.pvalue,
+            df.padj,
             df.other_info
-        
-        FROM insert_df df
+        FROM (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY experiment_id, COALESCE(gene_symbol, ensembl_id)
+                ORDER BY gene_symbol NULLS LAST, ensembl_id NULLS LAST
+            ) AS row_num
+            FROM insert_df
+        ) df
     
-        -- JOIN 1: Try to resolve the user's gene_symbol column against official symbols, aliases, and past symbols
         LEFT JOIN genes ref_sym ON (
-        UPPER(TRIM(df.gene_symbol)) = UPPER(ref_sym.symbol) OR 
-        list_contains(ref_sym.alias_symbol, UPPER(TRIM(df.gene_symbol))) OR
-        list_contains(ref_sym.prev_symbol, UPPER(TRIM(df.gene_symbol)))
+            UPPER(TRIM(df.gene_symbol)) = UPPER(ref_sym.symbol) OR 
+            list_contains(ref_sym.alias_symbol, UPPER(TRIM(df.gene_symbol))) OR
+            list_contains(ref_sym.prev_symbol, UPPER(TRIM(df.gene_symbol)))
         )
     
-        -- JOIN 2: Try to resolve the user's ensembl_id column (stripping versions like .1) against official Ensembl IDs
         LEFT JOIN genes ref_ens ON (
-        UPPER(TRIM(split_part(df.ensembl_id, '.', 1))) = UPPER(ref_ens.ensembl_id)
+            UPPER(TRIM(split_part(df.ensembl_id, '.', 1))) = UPPER(ref_ens.ensembl_id)
         )
-    
-        ORDER BY 
-            df.experiment_id, 
-            COALESCE(df.gene_symbol, df.ensembl_id), 
-            ref_sym.symbol NULLS LAST, 
-            ref_ens.ensembl_id NULLS LAST
+        WHERE df.row_num = 1
         ''')
 
         self.conn.commit()
         
-    def insert_to_database(self, info, tool=None, date=None, file_path=None, experiment_name=None, comparison_label=None):
+    def ingest(self, info, tool=None, date=None, file_path=None, experiment_name=None, comparison_label=None):
         """Normalize and ingest differential expression results into DuckDB.
 
         Args:

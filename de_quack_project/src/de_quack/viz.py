@@ -136,7 +136,7 @@ def volcano_plot(df, padj=0.05, log2fc=1, plot_file=None, pvalue=None, significa
     plt.xlabel('Log2 Fold Change')
     plt.ylabel(f'-Log10 {column}')
     plt.title('Volcano Plot')
-    plt.axhline(-np.log10(padj), color='black', linestyle='--')
+    plt.axhline(-np.log10(value), color='black', linestyle='--')
     plt.axvline(log2fc, color='black', linestyle='--')
     plt.axvline(-log2fc, color='black', linestyle='--')
 
@@ -145,10 +145,15 @@ def volcano_plot(df, padj=0.05, log2fc=1, plot_file=None, pvalue=None, significa
         for _, row in top_genes.iterrows():
             x = row['log2fc']
             y = -np.log10(row[column])
-            gene_label = str(row.get('gene_symbol', row.get('ensembl_id', '')))
+            if row.get('gene_symbol') and row.get('gene_symbol') not in ['', 'None']:
+                gene_label=row['gene_symbol']
+            elif row.get('ensembl_id') and row.get('ensembl_id') not in ['', 'None']:
+                gene_label=row['ensembl_id']
+            else:
+                gene_label=''
             if gene_label and gene_label != 'None':
                 texts.append(plt.text(x, y, gene_label, fontsize=8, weight='bold'))
-        
+                
         if texts:
             with warnings.catch_warnings():
                 with redirect_stdout(open(os.devnull, 'w')):
