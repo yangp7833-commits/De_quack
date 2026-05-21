@@ -40,7 +40,7 @@ class de_quackling:
         self.conn = None
         self.insertion_columns = {
         'gene_symbol': [
-            'gene_symbol', 'symbol', 'hgnc_symbol', 'genesymbol'
+            'gene_symbol', 'symbol', 'hgnc_symbol', 'genesymbol',
         ],
         'gene_name':['gene', 'gene_name', 'genename', 
             'name'],
@@ -234,14 +234,12 @@ class de_quackling:
             return pd.Timestamp.now().strftime('%Y-%m-%d'), file_path
     
     def _get_data_signature(self, df):
-       
-        df=self._preprocess_df(df, 0)
         sample_data=df[['gene_symbol', 'log2fc', 'pvalue']].head(100).to_string()
     
         # Generate a unique string (hash) from that data
         return hashlib.md5(sample_data.encode()).hexdigest()
 
-    def _preprocess_df(self, info, id):
+    def _preprocess_df(self, info, **config_columns):
         """Normalize incoming data into a dataframe suitable for insertion.
 
         Accepts a DataFrame, list-of-dicts, or a filepath. Normalization steps:
@@ -252,10 +250,18 @@ class de_quackling:
         Returns a DataFrame with columns: experiment_id, gene_name, log2fc,
         logCPM, pvalue, padj, other_info
         """
+        column_dict = {key: list(values) for key, values in self.insertion_columns.items()}
+        for column, alias in config_columns.items():
+            if column in column_dict:
+                column_dict[column] = [alias] if isinstance(alias, str) else alias
+            else:
+                raise ProcessingError(
+                    f"Column '{column}' is not a valid database column. Valid columns include: {list(self.insertion_columns.keys())}"
+                )
 
         if isinstance(info, list):
             if len(info) == 0:
-                return
+                raise ProcessingError("Info list is empty; no data to ingest.")
             if isinstance(info[0], dict):
                 info = pd.DataFrame(info)
             elif isinstance(info[0], pd.Series):
@@ -274,7 +280,7 @@ class de_quackling:
         
         # Map common source column variants to canonical insert columns.
         rename_map = {}
-        flat_map = {v.lower(): k for k, variants in self.insertion_columns.items() for v in variants}
+        flat_map = {v.lower(): k for k, variants in column_dict.items() for v in variants}
         rename_dict = {col: flat_map[col.lower().strip()] for col in info.columns if col.lower().strip() in flat_map}
         info.rename(columns=rename_dict, inplace=True)
 
@@ -317,7 +323,7 @@ class de_quackling:
             if col not in info.columns and col != 'other_info':
                 info[col] = None
         
-        extra_columns = [col for col in info.columns if col not in expected_cols and col != 'experiment_id']
+        extra_columns = [col for col in info.columns if col not in expected_cols]
         
         if len(extra_columns) > 0:
             # Any extra input columns should be folded into `other_info`.
@@ -325,27 +331,29 @@ class de_quackling:
             info.drop(columns=extra_columns, inplace=True)
 
             if 'other_info' in info.columns:
-                # Standardize existing `other_info` values so dictionaries merge cleanly.
-                existing_info = info['other_info'].to_dict()
-        
-                # Merge old and new dictionaries efficiently using a list comprehension
+                def _parse_other_info(value):
+                    if isinstance(value, str):
+                        try:
+                            return json.loads(value)
+                        except (ValueError, TypeError):
+                            return {}
+                    if isinstance(value, dict):
+                        return value
+                    return {}
+
+                existing_info = [_parse_other_info(v) for v in info['other_info'].tolist()]
                 merged_info = [
-                {**old, **new} if old else new 
-                for old, new in zip(existing_info, extra_data)
+                    {**old, **new} if old else new
+                    for old, new in zip(existing_info, extra_data)
                 ]
-                info['other_info']=[json.dumps(row) for row in merged_info]
+                info['other_info'] = [json.dumps(row) for row in merged_info]
             else:
-            # If it didn't exist, safe to just assign it directly
-                info['other_info'] = extra_data
                 info['other_info'] = [json.dumps(row) for row in extra_data]
             if 'other_info' not in info.columns:
                 info['other_info'] = None
         elif 'other_info' not in info.columns:
             info['other_info']=None
 
-        
-        
-        info['experiment_id'] = id
         return info
 
     
@@ -360,7 +368,7 @@ class de_quackling:
         populating the `genes` reference table for symbol and Ensembl matching.
         """
         if species == 'human':
-            url = 'https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt'
+            url = 'https://github.com/yangp7833-commits/De_quack/tree/main/de_quack_project/assets/gene_tables/human_genes.parquet'
         else:
             raise ProcessingError(f"Unsupported species '{species}'. Only 'human' is currently supported.")
 
@@ -368,24 +376,26 @@ class de_quackling:
             self.conn.execute('''
             INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
             SELECT 
-                csv_data.symbol, 
-                CAST(regexp_replace(csv_data.hgnc_id, '^hgnc:', '', 'i') AS INTEGER) AS id, 
-                csv_data.ensembl_gene_id, 
-                string_split(UPPER(COALESCE(csv_data.alias_symbol, '')), '|') as alias_symbol, 
-                string_split(UPPER(COALESCE(csv_data.prev_symbol, '')), '|') as prev_symbol, 
-                'human' as species 
-            FROM read_csv_auto(?) AS csv_data
+                parquet_data.symbol as symbol,
+                parquet_data.id as id,
+                parquet_data.ensembl_id as ensembl_id,
+                parquet_data.alias_symbol as alias_symbol,
+                parquet_data.prev_symbol as prev_symbol,
+                parquet_data.species as species
+            FROM read_parquet(?) AS parquet_data
             ''', (url,))
+            self.conn.commit()
+
         except duckdb.ConstraintException as e:
             raise DuplicateGeneTableError(
                 'Gene reference data appears to have already been loaded or the gene table has duplicate entries.'
             ) from e
 
     def _create_experiment(self, tool, date, file_path, data_signature, experiment_name=None, comparison_label=None):
-        duplicate_ids=results = self.conn.execute(
+        duplicate_ids = self.conn.execute(
             "SELECT experiment_id FROM experimental_data WHERE data_signature = ?", 
             (data_signature,)
-            ).fetchall()
+        ).fetchall()
         if len(duplicate_ids) > 0:
             raise DuplicateExperimentError(
                 f'Data is identical to data in experiment id: {duplicate_ids[0][0]}. Duplicate experiments are not allowed.'
@@ -438,7 +448,7 @@ class de_quackling:
 
         self.conn.commit()
         
-    def ingest(self, info, tool=None, date=None, file_path=None, experiment_name=None, comparison_label=None):
+    def ingest(self, info, tool=None, date=None, file_path=None, experiment_name=None, comparison_label=None, **config_columns):
         """Normalize and ingest differential expression results into DuckDB.
 
         Args:
@@ -456,12 +466,22 @@ class de_quackling:
 
         if experiment_name is None or comparison_label is None:
             raise ProcessingError('You must include an experiment name and comparison label for your experiment!')
-        date, file_path = self._find_date_and_file(info)
+
+        if date is None or file_path is None:
+            derived_date, derived_file_path = self._find_date_and_file(info)
+            if date is None:
+                date = derived_date
+            if file_path is None:
+                file_path = derived_file_path
+
         if date:
             date = pd.to_datetime(date).strftime('%Y-%m-%d')
-        data_signature=self._get_data_signature(info)
+
+        df = self._preprocess_df(info, **config_columns)
+        data_signature=self._get_data_signature(df)
         id = self._create_experiment(tool, date, file_path, data_signature, experiment_name, comparison_label)
-        df = self._preprocess_df(info, id)
+        ids=[id]*len(df)
+        df['experiment_id']=ids
         self._insert_gene_results(df)
         
 

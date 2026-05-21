@@ -88,7 +88,7 @@ DeDuck <- R6::R6Class(
       invisible(self)
     },
 
-    insgest = function(info, tool = NULL, date = NULL, file_path = NULL, experiment_name = NULL, comparison_label = NULL) {
+    ingest = function(info, tool = NULL, date = NULL, file_path = NULL, experiment_name = NULL, comparison_label = NULL) {
       stopifnot(!is.null(self$py_db))
       self$py_db$ingest(
         info,

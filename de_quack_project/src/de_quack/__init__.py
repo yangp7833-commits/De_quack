@@ -1,6 +1,6 @@
 """de_quack package initializer."""
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 from .core import de_quackling
 from .viz import volcano_plot

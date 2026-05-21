@@ -33,7 +33,7 @@ from de_quack import de_quackling, volcano_plot
 
 with de_quackling('results.duckdb') as db:
     db.initialize_gene_table('human')
-    db.insert_to_database('data.txt', experiment_name='test', comparison_label='test')
+    db.ingest('data.txt', experiment_name='test', comparison_label='test')
     results = db.query('gene_results', padj__lt=0.05)
     print(results)
     
@@ -52,7 +52,7 @@ source(file.path(py_pkg_path, "wrapper.R"))
 duck <- de_quack(db_path = "results.duckdb")
 duck$connect()
 duck$initialize_gene_table('human')
-duck$insert_to_database('data.txt', experiment_name = 'test', comparison_label = 'test')
+duck$ingest('data.txt', experiment_name = 'test', comparison_label = 'test')
 results <- duck$query('gene_results', padj__lt=0.05)
 duck$volcano_plot(results, padj=0.05, log2fc=1, plot_file='volcano.png')
 duck$close()
