@@ -4,6 +4,7 @@ pyproject.toml
 src/de_quack/__init__.py
 src/de_quack/core.py
 src/de_quack/exceptions.py
+src/de_quack/utilities.py
 src/de_quack/viz.py
 src/de_quack.egg-info/PKG-INFO
 src/de_quack.egg-info/SOURCES.txt

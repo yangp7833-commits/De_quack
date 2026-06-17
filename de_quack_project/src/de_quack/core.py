@@ -19,15 +19,19 @@ Workflow summary (high level):
      concrete SQL clauses, and execute against DuckDB.
 """
 import duckdb
+from duckdb import SQLExpression, CaseExpression, ColumnExpression, ConstantExpression, FunctionExpression
 import re
-import pandas as pd
 import os
 import json
+import uuid
 from pathlib import Path
 import hashlib
 import sys
 import difflib
+import datetime
+import pandas as pd
 from .exceptions import ProcessingError, DuplicateExperimentError, DuplicateGeneTableError
+from .utilities import gene_columns, ExperimentMetadata
 
 class de_quackling:
     def __init__(self, db_path='SQL.duckdb'):
@@ -38,31 +42,7 @@ class de_quackling:
         """
         self.db_path = db_path
         self.conn = None
-        self.insertion_columns = {
-        'gene_symbol': [
-            'gene_symbol', 'symbol', 'hgnc_symbol', 'genesymbol',
-        ],
-        'gene_name':['gene', 'gene_name', 'genename', 
-            'name'],
-        'ensembl_id': [
-            'ensembl_id', 'ensembl', 'gene_id', 'geneid', 'ensembl_gene_id', 
-            'target_id', 'feature_id'
-        ],
-        'pvalue': [
-        'pvalue', 'p_value', 'p.value', 'p-value', 'pval', 'p.val', 'p_val'
-        ],
-        'padj': [
-        'padj', 'p.adj', 'p_adj', 'p.adjusted', 'p_adjusted', 
-        'fdr', 'qval', 'qvalue', 'q-value', 'adj.p.val', 'adj.p.value'
-        ],
-        'log2fc': [
-            'log2foldchange', 'log2fc', 'log2_fc', 'log2.fc', 'logfc', 'log_fc', 'log.fc'
-            ],
-        'base_mean': [
-        'basemean', 'base_mean',  'aveexpr', 'tpm', 'fpkm'
-        ],
-        'logCPM':['logcpm', 'log_cpm', 'log.cpm']
-        }
+        
         
         
     def __enter__(self):
@@ -80,8 +60,8 @@ class de_quackling:
         # Create tables if they don't already exist.
         self.conn.execute('''CREATE TABLE IF NOT EXISTS experimental_data
                             (experiment_id INTEGER PRIMARY KEY DEFAULT nextval('seq_experiment_id'), 
-                             tool VARCHAR, date VARCHAR, file VARCHAR, 
-                             experiment_name VARCHAR, comparison_label VARCHAR, data_signature VARCHAR)''')
+                             model VARCHAR, date VARCHAR, file VARCHAR, 
+                             experiment_name VARCHAR, contrast VARCHAR, annotation_version VARCHAR, normalization VARCHAR, other_info VARCHAR, data_signature VARCHAR)''')
         
         
         self.conn.execute('''CREATE SEQUENCE IF NOT EXISTS seq_gene_id START 1''')
@@ -107,8 +87,16 @@ class de_quackling:
                             alias_symbol VARCHAR[],
                             prev_symbol VARCHAR[], species VARCHAR,
                             PRIMARY KEY (id, species) 
-
                             )''')
+        
+        self.conn.execute('''CREATE TABLE IF NOT EXISTS gene_columns 
+                        (column_name VARCHAR, alias_names VARCHAR[]
+                        )''')
+        self.conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_gene_columns_name ON gene_columns(column_name)')
+        self.conn.execute('''INSERT OR REPLACE INTO gene_columns (column_name, alias_names) 
+                        VALUES ('gene_symbol', ?), ('ensembl_id', ?), ('pvalue', ?), ('padj', ?), ('log2fc', ?), ('base_mean', ?), ('logCPM', ?), ('gene_name', ?)''',
+                        (gene_columns['gene_symbol'], gene_columns['ensembl_id'], gene_columns['pvalue'], gene_columns['padj'], gene_columns['log2fc'], gene_columns['base_mean'], gene_columns['logCPM'], gene_columns['gene_name']))
+
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_ref_symbol ON genes (symbol)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS index_ref_ensembl_id ON genes (ensembl_id)")
 
@@ -137,229 +125,141 @@ class de_quackling:
             self.__enter__()
         return self
 
-    def _split_filter_key(self, filter_key):
-        # Parse the optional operator suffix from filter keys like `pvalue__gt`.
-        if '__' in filter_key:
-            filter_column, _, suffix = filter_key.rpartition('__')
-            if suffix in ['gt', 'lt', 'gte', 'lte', 'ne']:
-                return filter_column, suffix
-        return filter_key, None
 
-    def _resolve_filter_column(self, filter_column, actual_columns, table):
-        # if the filter column is in the actual columns, returns the column as is
-        lower_columns = [col.lower() for col in actual_columns]
-        if filter_column.lower() in lower_columns:
-            return actual_columns[lower_columns.index(filter_column.lower())]
 
-        # If the user typoed a column, proactively suggest the closest real name.
-        close_matches = difflib.get_close_matches(filter_column.lower(), lower_columns, n=1, cutoff=0.8)
-        if close_matches:
-            suggested = actual_columns[lower_columns.index(close_matches[0])]
-            raise ProcessingError(f"Column '{filter_column}' does not exist in table '{table}'. Did you mean '{suggested}'?")
-
-        # Allow fallback to other_info JSON if the requested field is not a native column.
-        if 'other_info' in actual_columns:
-            return None
-
-        raise ProcessingError(
-            f"Column '{filter_column}' does not exist in table '{table}'. Available columns: {', '.join(actual_columns)}"
-        )
-
-    def _build_filter_clause(self, filter_column, operator, value, actual_columns, table):
-        """Return an SQL clause and params for the given filter.
-
-        If the filter_column maps to a real column, use that column for the
-        comparison. If it does not but `other_info` exists, translate to a
-        JSON extraction using the `->>` operator. Numeric comparisons are
-        supported by casting the extracted JSON text to DOUBLE.
-        """
-        actual_column = self._resolve_filter_column(filter_column, actual_columns, table)
-        operators = {
-            'gt': '>',
-            'lt': '<',
-            'gte': '>=',
-            'lte': '<=',
-            'ne': '!='
-        }
-
-        if actual_column is not None:
-            if actual_column in ['experiment_name', 'comparison_label', 'gene_symbol', 'tool']:
-                return f'{actual_column} ILIKE ?', f'%{value}%'
-            if operator is None:
-                return f"{actual_column} = ?", value
-            if actual_column=='date':
-                value=str(pd.to_datetime(value).strftime('%Y-%m-%d'))
-
-            if operator not in operators:
-                raise ProcessingError(f"Invalid operator '{operator}' for column '{filter_column}'.")
-
-            return f"{actual_column} {operators[operator]} ?", value
-
-        if 'other_info' not in actual_columns:
-            raise ProcessingError(
-                f"Column '{filter_column}' does not exist in table '{table}', and no JSON fallback is available."
-            )
-
-        # Use ->> to extract the top-level JSON field as text from other_info.
-        print(f'{filter_column} does not exist in {table}, querying JSON...')
-        json_key = filter_column.replace("'", "''")
-        json_expr = f"other_info ->> '{json_key}'"
-
-        if operator is None:
-            return f"({json_expr}) = ?", value
-        if operator == 'ne':
-            return f"({json_expr}) != ?", value
-
-        # For numeric comparisons, CAST the extracted text to DOUBLE
-        if operator in ('gt', 'lt', 'gte', 'lte'):
-            return f"CAST({json_expr} AS DOUBLE) {operators[operator]} ?", value
-
-        raise ProcessingError(
-            f"JSON filtering only supports equality, inequality, and numeric comparisons for '{filter_column}'."
-        )
-
-    def _find_date_and_file(self, info):
-        if os.path.isfile(os.path.abspath(info)):
-            date_pattern = re.compile(r'(\d{4}-\d{2}-\d{2})') 
-            match = date_pattern.search(info) # first tries to find the date using regex on the file name
-            file_path=os.path.abspath(info)
-            if match:
-                return pd.to_datetime(match.group(1), format='%Y-%m-%d'), file_path
-            else: # if the search doesn't work, then uses the path library to find the time, or else uses none
-                path=Path(file_path)
-                if path.stat().st_mtime:
-                    return pd.to_datetime(path.stat().st_mtime, unit='s').strftime('%Y-%m-%d'), file_path
-        else:
-            file_path='dataframe'
-            return pd.Timestamp.now().strftime('%Y-%m-%d'), file_path
-    
-    def _get_data_signature(self, df):
-        sample_data=df[['gene_symbol', 'log2fc', 'pvalue']].head(100).to_string()
+    def _get_data_signature(self):
+        sample_data=self.conn.execute('SELECT * FROM (SELECT * FROM preprocessed_data LIMIT 100)').fetchall()
     
         # Generate a unique string (hash) from that data
-        return hashlib.md5(sample_data.encode()).hexdigest()
+        return hashlib.md5(str(sample_data).encode()).hexdigest()
 
-    def _preprocess_df(self, info, **config_columns):
-        """Normalize incoming data into a dataframe suitable for insertion.
-
-        Accepts a DataFrame, list-of-dicts, or a filepath. Normalization steps:
-        - Convert supported inputs to a pandas DataFrame
-        - Rename known input column variants to canonical insertion column names
-        - Ensure expected columns exist and aggregate any extra columns into
-          the `other_info` JSON column (as dicts)
-        Returns a DataFrame with columns: experiment_id, gene_name, log2fc,
-        logCPM, pvalue, padj, other_info
-        """
-        column_dict = {key: list(values) for key, values in self.insertion_columns.items()}
-        for column, alias in config_columns.items():
-            if column in column_dict:
-                column_dict[column] = [alias] if isinstance(alias, str) else alias
-            else:
-                raise ProcessingError(
-                    f"Column '{column}' is not a valid database column. Valid columns include: {list(self.insertion_columns.keys())}"
-                )
-
-        if isinstance(info, list):
-            if len(info) == 0:
-                raise ProcessingError("Info list is empty; no data to ingest.")
-            if isinstance(info[0], dict):
-                info = pd.DataFrame(info)
-            elif isinstance(info[0], pd.Series):
-                info = pd.DataFrame(info)
-            else:
-                raise ProcessingError(f"Info list contains unsupported element type {type(info[0])}.")
-        elif isinstance(info, pd.DataFrame):
-            info = info.copy()
-        elif isinstance(info, str):
-            if os.path.isfile(os.path.abspath(info)):
-                info = pd.read_csv(os.path.abspath(info), sep=None, engine='python')
-            else:
-                raise ProcessingError(f'file path {info} is not a valid file path/directory')
-        else:
-            raise ProcessingError(f'Info is in an unexpected format {type(info)}; please provide a pandas DataFrame, a list of dictionaries, or a file path to a CSV or TSV file.')
+   
+    
         
-        # Map common source column variants to canonical insert columns.
-        rename_map = {}
-        flat_map = {v.lower(): k for k, variants in column_dict.items() for v in variants}
-        rename_dict = {col: flat_map[col.lower().strip()] for col in info.columns if col.lower().strip() in flat_map}
-        info.rename(columns=rename_dict, inplace=True)
 
-        if 'ensembl_id' in info.columns and 'gene_symbol' not in info.columns:
-            info['gene_symbol'] = None
-        if 'gene_symbol' in info.columns and 'ensembl_id' not in info.columns:
-            info['ensembl_id'] = None
-
-
-        if 'gene_name' in info.columns:
-            if info['ensembl_id'].notnull().any(): # ensembl_id already exists
-                info['gene_symbol'] = info['gene_name']
-            elif info['gene_symbol'].notnull().any(): # gene_symbol already exists
-                info['ensembl_id'] = info['gene_name']
-            else:
-       
-                sample = str(info['gene_name'].dropna().iloc[0]).strip()
-                
-                if re.match('^ENS',sample):
-                    info['ensembl_id'] = info['gene_name']
-                    info['gene_symbol'] = None
-                else:
-                    info['gene_symbol'] = info['gene_name']
-                    info['ensembl_id'] = None
-            
-        if 'gene_name' in info.columns:
-            info.drop(columns=['gene_name'], inplace=True)
-        
-        if 'base_mean' in info.columns:
-            if 'logCPM' in info.columns:
-                info=info.drop('base_mean', axis=1)
-            else:
-                np_hidden = pd.core.computation.expressions.np
-                info['logCPM'] = np_hidden.log2(info['base_mean'] + 1).round(2)
-                info=info.drop('base_mean', axis=1)
-        
-        
-        expected_cols = ["log2fc", "logCPM", "pvalue", "padj", 'other_info', 'ensembl_id', 'gene_symbol']
-        for col in expected_cols:
-            if col not in info.columns and col != 'other_info':
-                info[col] = None
-        
-        extra_columns = [col for col in info.columns if col not in expected_cols]
-        
-        if len(extra_columns) > 0:
-            # Any extra input columns should be folded into `other_info`.
-            extra_data = info[extra_columns].to_dict(orient='records')
-            info.drop(columns=extra_columns, inplace=True)
-
-            if 'other_info' in info.columns:
-                def _parse_other_info(value):
-                    if isinstance(value, str):
-                        try:
-                            return json.loads(value)
-                        except (ValueError, TypeError):
-                            return {}
-                    if isinstance(value, dict):
-                        return value
-                    return {}
-
-                existing_info = [_parse_other_info(v) for v in info['other_info'].tolist()]
-                merged_info = [
-                    {**old, **new} if old else new
-                    for old, new in zip(existing_info, extra_data)
-                ]
-                info['other_info'] = [json.dumps(row) for row in merged_info]
-            else:
-                info['other_info'] = [json.dumps(row) for row in extra_data]
-            if 'other_info' not in info.columns:
-                info['other_info'] = None
-        elif 'other_info' not in info.columns:
-            info['other_info']=None
-
-        return info
+    def _create_temp_view(self): 
+        from duckdb import SQLExpression
 
     
+        columns_info = self.conn.execute(f'''
+            SELECT 
+                t.column_name AS incoming_col, 
+                g.column_name AS real_col
+            FROM duckdb_columns() AS t
+            LEFT JOIN gene_columns AS g
+                ON list_contains(g.alias_names, lower(t.column_name))
+            WHERE t.table_name = 'preprocessed_data'
+            ORDER BY t.column_index
+        ''').fetchall()
+
+        if not columns_info:
+            raise ProcessingError("The registered table contains no columns.")
+      
+        temp_view = self.conn.table('preprocessed_data')
+
+        mapped_incoming = []
+        all_columns = []
+        columns = []
+        expressions=[]
+        numeric_columns = {'log2fc', 'logCPM', 'pvalue', 'padj', 'base_mean'}
+
+        for incoming_col, real_col in columns_info:
+            all_columns.append(incoming_col)
+            # real_col may be None if no alias matched
+            if real_col == 'gene_name':
+                # sample a real cell value from this incoming column (avoid placeholder misuse)
+                sample = temp_view.select(ColumnExpression(incoming_col)).limit(1).fetchall()
+                sample_val = sample[0] if sample is not None else None
+                if sample_val is not None and re.match(r'^ENS', str(sample_val)):
+                    mapped_incoming.append(incoming_col)
+                    expressions.append(ColumnExpression(incoming_col).alias('ensembl_id'))
+                    columns.append('ensembl_id')
+                elif 'gene_symbol' not in [col[0] for col in columns_info]:
+                    mapped_incoming.append(incoming_col)
+                    expressions.append(ColumnExpression(incoming_col).alias('gene_symbol'))
+                    columns.append('gene_symbol')
+                else:
+                    pass
+            elif real_col is not None:
+                if real_col != 'base_mean':
+                    mapped_incoming.append(incoming_col)
+                expressions.append(ColumnExpression(incoming_col).alias(real_col))
+                columns.append(real_col)
+
+        if not mapped_incoming:
+            raise ProcessingError(
+                'No recognizable gene result columns were found in the input. '
+                'Verify the header names against gene_columns aliases.'
+            )
+    
+        extra_columns = [col for col in all_columns if col not in mapped_incoming]
+        if extra_columns:
+            struct_items=[]
+            for column in extra_columns:
+                struct_items.append(ConstantExpression(column))
+                struct_items.append(ColumnExpression(column))
+            json_expr = FunctionExpression('json_object', *struct_items)
+            expressions.append(json_expr.alias('other_info'))
+        else:
+            expressions.append(ConstantExpression(None).alias('other_info'))
+        
+        
+        
+        if 'gene_symbol' not in columns:
+            expressions.append(SQLExpression('NULL').alias('gene_symbol'))
+        if 'ensembl_id' not in columns:
+            expressions.append(SQLExpression('NULL').alias('ensembl_id'))
+        if 'logCPM' not in columns:
+            expressions.append(SQLExpression('NULL').alias('logCPM'))
+
+        if not mapped_incoming:
+            raise ProcessingError(
+                'No recognizable gene result columns were found in the input. '
+                'Verify the header names against gene_columns aliases.'
+            )
+        temp_view=temp_view.select(*expressions)
+        return temp_view
 
 
 
+
+    def _preprocess(self, info):
+
+        if isinstance(info, str) and os.path.isfile(os.path.abspath(info)):
+            info=os.path.abspath(info)
+            if info.lower().endswith('.parquet'):
+                self.conn.execute('DROP VIEW IF EXISTS preprocessed_data')
+                self.conn.read_parquet(info, header=True).create_view('preprocessed_data')
+                return
+            else:
+                self.conn.execute('DROP VIEW IF EXISTS preprocessed_data')
+                self.conn.from_csv_auto(info, header=True).create_view("preprocessed_data")
+                return
+        if isinstance(info, str) and not os.path.isfile(os.path.abspath(info)):
+            raise ProcessingError(f"{os.path.abspath(info)} is not a valid file path.")
+        
+
+        class_name = info.__class__.__name__.lower()
+        self.conn.execute('DROP VIEW IF EXISTS preprocessed_data')
+
+        if isinstance(info, de_arrow):
+            self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
+            return
+
+
+        if class_name == 'dataframe':
+            self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
+            return
+
+        if class_name == 'Table':
+            self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
+            return
+        
+
+        raise ProcessingError(f'type {type(info)} is not supported. Provide a pandas DataFrame, list of dicts, or path to a CSV/TSV/Parquet file.')
+
+
+    
 
     def initialize_gene_table(self, species):
         """Load species-specific reference gene annotation data into the database.
@@ -368,7 +268,7 @@ class de_quackling:
         populating the `genes` reference table for symbol and Ensembl matching.
         """
         if species == 'human':
-            url = 'https://github.com/yangp7833-commits/De_quack/tree/main/de_quack_project/assets/gene_tables/human_genes.parquet'
+            url = 'https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt'
         else:
             raise ProcessingError(f"Unsupported species '{species}'. Only 'human' is currently supported.")
 
@@ -376,13 +276,13 @@ class de_quackling:
             self.conn.execute('''
             INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
             SELECT 
-                parquet_data.symbol as symbol,
-                parquet_data.id as id,
-                parquet_data.ensembl_id as ensembl_id,
-                parquet_data.alias_symbol as alias_symbol,
-                parquet_data.prev_symbol as prev_symbol,
-                parquet_data.species as species
-            FROM read_parquet(?) AS parquet_data
+                csv_data.symbol, 
+                CAST(regexp_replace(csv_data.hgnc_id, '^hgnc:', '', 'i') AS INTEGER) AS id, 
+                csv_data.ensembl_gene_id, 
+                string_split(UPPER(COALESCE(csv_data.alias_symbol, '')), '|') as alias_symbol, 
+                string_split(UPPER(COALESCE(csv_data.prev_symbol, '')), '|') as prev_symbol, 
+                'human' as species 
+            FROM read_csv_auto(?) AS csv_data
             ''', (url,))
             self.conn.commit()
 
@@ -391,251 +291,96 @@ class de_quackling:
                 'Gene reference data appears to have already been loaded or the gene table has duplicate entries.'
             ) from e
 
-    def _create_experiment(self, tool, date, file_path, data_signature, experiment_name=None, comparison_label=None):
+    def _create_experiment(self,metadata_fields, data_signature, other_info):
         duplicate_ids = self.conn.execute(
             "SELECT experiment_id FROM experimental_data WHERE data_signature = ?", 
             (data_signature,)
         ).fetchall()
-        if len(duplicate_ids) > 0:
-            raise DuplicateExperimentError(
-                f'Data is identical to data in experiment id: {duplicate_ids[0][0]}. Duplicate experiments are not allowed.'
-            )
-
-
-        
+        #if len(duplicate_ids) > 0:
+            #raise DuplicateExperimentError(
+                #f'Data is identical to data in experiment id: {duplicate_ids[0][0]}. Duplicate experiments are not allowed.'
+            #)
         result = self.conn.execute(
-            "INSERT INTO experimental_data (tool, date, file, experiment_name, comparison_label, data_signature) VALUES (?, ?, ?, ?, ?, ?) RETURNING experiment_id",
-            (tool, date, file_path, experiment_name, comparison_label, data_signature)
+            "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
+            (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, data_signature)
         ).fetchall()
         self.conn.commit()
         
         return result[0][0]
 
-    def _insert_gene_results(self, insert_df):
-        
+    def _insert_gene_results(self, experiment_id, view):
+
+
         self.conn.execute('''
-        INSERT INTO gene_results 
-        (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, other_info) 
-    
-        SELECT 
-            df.experiment_id,
-            COALESCE(ref_sym.symbol, ref_ens.symbol, df.gene_symbol) as gene_symbol,
-            COALESCE(ref_ens.ensembl_id, ref_sym.ensembl_id, df.ensembl_id) as ensembl_id,
-            df.log2fc,
-            df.logCPM,
-            df.pvalue,
-            df.padj,
-            df.other_info
-        FROM (
-            SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY experiment_id, COALESCE(gene_symbol, ensembl_id)
-                ORDER BY gene_symbol NULLS LAST, ensembl_id NULLS LAST
-            ) AS row_num
-            FROM insert_df
-        ) df
-    
-        LEFT JOIN genes ref_sym ON (
-            UPPER(TRIM(df.gene_symbol)) = UPPER(ref_sym.symbol) OR 
-            list_contains(ref_sym.alias_symbol, UPPER(TRIM(df.gene_symbol))) OR
-            list_contains(ref_sym.prev_symbol, UPPER(TRIM(df.gene_symbol)))
+        INSERT INTO gene_results (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, other_info)
+        SELECT ? AS experiment_id,
+            COALESCE(ens.symbol, sym.symbol, e.gene_symbol) AS gene_symbol,
+            COALESCE(ens.ensembl_id, sym.ensembl_id, e.ensembl_id) AS ensembl_id,
+            COALESCE(TRY_CAST(e.log2fc AS DOUBLE), NULL),
+            COALESCE(TRY_CAST(e.logCPM AS DOUBLE), log2(e.base_mean + 1), NULL),
+            COALESCE(TRY_CAST(e.pvalue AS DOUBLE), NULL),
+            COALESCE(TRY_CAST(e.padj AS DOUBLE), NULL),
+            e.other_info
+        FROM view as e
+        LEFT JOIN genes ens ON  (
+            e.ensembl_id IS NOT NULL AND ens.ensembl_id = UPPER(TRIM(e.ensembl_id))
         )
-    
-        LEFT JOIN genes ref_ens ON (
-            UPPER(TRIM(split_part(df.ensembl_id, '.', 1))) = UPPER(ref_ens.ensembl_id)
-        )
-        WHERE df.row_num = 1
-        ''')
+
+        LEFT JOIN genes sym ON (
+            e.gene_symbol IS NOT NULL AND sym.symbol = UPPER(TRIM(e.gene_symbol)) OR
+            e.gene_symbol IS NOT NULL AND sym.prev_symbol IS NOT NULL AND list_contains(sym.prev_symbol, e.gene_symbol)
+            )
+        
+        
+        ''', (experiment_id,))
 
         self.conn.commit()
         
-    def ingest(self, info, tool=None, date=None, file_path=None, experiment_name=None, comparison_label=None, **config_columns):
+    def ingest(self, info, metadata: dict, **config_columns):
         """Normalize and ingest differential expression results into DuckDB.
 
         Args:
-            info: pandas DataFrame, list of dicts, or path to a CSV/TSV file.
-            tool: optional source tool name.
-            date: optional experiment date; auto-detected from file path or current time.
-            file_path: optional source file path.
+            metadata: A dictionary containing the experiment metadata.
+            **config_columns: additional configuration columns for the ingestion process.
+        
+
             experiment_name: human-readable experiment name.
-            comparison_label: label for the comparison being stored.
+            date: optional experiment date; auto-detected from file path or current time.
+            tool: optional source tool name.
+            **config_columns: additional configuration columns for the ingestion process.
 
         The method validates required metadata, calculates a data signature,
         prevents duplicate experiments, and loads normalized gene results into
         `gene_results` with canonical symbol/Ensembl mapping.
         """
 
-        if experiment_name is None or comparison_label is None:
-            raise ProcessingError('You must include an experiment name and comparison label for your experiment!')
+        metadata_fields, other_info = ExperimentMetadata().to_dict(metadata, info)
 
-        if date is None or file_path is None:
-            derived_date, derived_file_path = self._find_date_and_file(info)
-            if date is None:
-                date = derived_date
-            if file_path is None:
-                file_path = derived_file_path
-
-        if date:
-            date = pd.to_datetime(date).strftime('%Y-%m-%d')
-
-        df = self._preprocess_df(info, **config_columns)
-        data_signature=self._get_data_signature(df)
-        id = self._create_experiment(tool, date, file_path, data_signature, experiment_name, comparison_label)
-        ids=[id]*len(df)
-        df['experiment_id']=ids
-        self._insert_gene_results(df)
-        
+        self._preprocess(info)
+        data_signature = self._get_data_signature()
+        id = self._create_experiment(metadata_fields, data_signature, other_info)
+        view=self._create_temp_view()
+        self._insert_gene_results(id, view)
+    
 
     def close(self):
         """Close the active DuckDB connection and reset internal state."""
         if self.conn:
             self.conn.close()
             self.conn = None
+    
+
+
+
             
-    def query(self, table, save_path=None, **filters):
-        """Query a table using keyword filters.
-
-        Filters are provided as kwargs like `pvalue__gt=0.05` or `gene_symbol='TP53'`.
-        The method resolves filter column names to actual table columns; if a
-        close (typo) match exists a ValueError is raised suggesting the correct
-        name. If no close match exists and `other_info` is present, the filter
-        will be applied against `other_info` JSON.
-        Returns a pandas DataFrame with results.
-        """
-        table_names = [t[0] for t in self.tables]
-        if table not in table_names:
-           raise ProcessingError(f"Table '{table}' does not exist in the database. Available tables: {', '.join(table_names)}")
-
-        if table == 'gene_results':
-            actual_columns = [col[3] for col in self.gene_columns]
-        elif table == 'experimental_data':
-            actual_columns = [col[3] for col in self.experiment_columns]
-        else:
-            cols = self.conn.execute("SELECT * FROM information_schema.columns WHERE table_name=?", (table,)).fetchall()
-            actual_columns = [col[3] for col in cols]
-
-        clauses = []
-        params = []
-        for filter_key, filter_value in filters.items():
-            filter_column, filter_operator = self._split_filter_key(filter_key)
-            clause, clause_params = self._build_filter_clause(filter_column, filter_operator, filter_value, actual_columns, table)
-            clauses.append(clause)
-            params.append(clause_params)
-        
-
-        # Build a simple WHERE clause incrementally from normalized filter expressions.
-        query = f'SELECT * FROM {table} WHERE 1=1'
-        for clause in clauses:
-            query += f' AND {clause}'
-
-        
-        df = self.conn.execute(query, params).df()
-        
-        if 'id' in df.columns:
-            df = df.set_index('id')
-        elif not save_path and 'experiment_id' in df.columns:
-            df = df.set_index('experiment_id')
-
-        if save_path:
-            folder = os.path.dirname(save_path)
-            if folder and not os.path.exists(folder):
-                os.makedirs(folder)
-
-            if save_path.endswith('.csv'):
-                df.to_csv(save_path, index=False)
-            elif save_path.endswith('.xlsx'):
-                try:
-                    import openpyxl
-                    df.to_excel(save_path, index=False)
-                except ImportError:
-                    print("openpyxl library is required to save as Excel. Please install it using 'pip install openpyxl'.")
-            elif save_path.endswith('.json'):
-                df.to_json(save_path, orient='records')
-            else:
-                df.to_csv(save_path, index=False)
-
-            print(f"Successfully saved results to {save_path}")
-
-        print(f'found {len(df)} results matching the query.')
-        return df
-       
-   
-    
-    def delete_gene_results(self, **filters):
-        """Delete rows from `gene_results` matching provided filters.
-
-        Filters use the same syntax as `query()`. This method resolves filters
-        into SQL WHERE clauses and executes a DELETE. It raises if no filters
-        are provided to avoid accidental full-table deletion.
-        """
-        actual_columns = [col[3] for col in self.gene_columns]
-        if not filters:
-            raise ProcessingError("No filters provided. Don't delete everything by accident!")
-
-        clauses = []
-        params = []
-        for filter_key, filter_value in filters.items():
-            filter_column, filter_operator = self._split_filter_key(filter_key)
-            clause, clause_params = self._build_filter_clause(filter_column, filter_operator, filter_value, actual_columns, 'gene_results')
-            clauses.append(clause)
-            params.append(clause_params)
-
-        # Perform a filtered delete; this always requires filters to avoid full-table removal.
-        query = 'DELETE FROM gene_results WHERE 1=1'
-        for clause in clauses:
-            query += f' AND {clause}'
-
-        self.conn.execute(query, params)
-        self.conn.commit()
-        print('successfully deleted gene results')
-    
-
-        
-        
-        
-       
-
-    def delete_experiments(self, **filters):
-        """Delete experiments and their associated gene results.
-
-        Resolves filters into a WHERE clause against `experimental_data` and
-        deletes matching experiments as well as all linked entries in
-        `gene_results`.
-        """
-        actual_columns = [col[3] for col in self.experiment_columns]
-        if len(filters) == 0:
-            raise ProcessingError("No filters provided for deletion.")
-
-        clauses = []
-        params = []
-        for filter_key, filter_value in filters.items():
-            filter_column, filter_operator = self._split_filter_key(filter_key)
-            clause, clause_params = self._build_filter_clause(filter_column, filter_operator, filter_value, actual_columns, 'experimental_data')
-            clauses.append(clause)
-            params.append(clause_params)
-
-        where_clause = " WHERE 1=1"
-        for clause in clauses:
-            where_clause += f' AND {clause}'
-
-        try:
-            self.conn.execute("BEGIN TRANSACTION")
-            self.conn.execute(
-                f"DELETE FROM gene_results WHERE experiment_id IN (SELECT experiment_id FROM experimental_data{where_clause})",
-                params
-            )
-            self.conn.commit()
-            self.conn.execute(f"DELETE FROM experimental_data{where_clause}", params)
-            self.conn.commit()
-            print('deleted experiments and associated gene results')
-        except Exception as e:
-            self.conn.execute("ROLLBACK")
-            raise
        
 
         
     
-    def execute_raw(self, query):
-        self.conn.execute(query)
+    def execute_raw(self, query, values=None):
+        return self.conn.execute(query, (values,))
+
+
 
     
 
