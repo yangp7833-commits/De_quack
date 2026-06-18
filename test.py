@@ -10,8 +10,7 @@ metadata={'annotation_version':'ensembl_2', 'experiment_name':'test', 'contrast'
     #db.ingest(metadata=metadata, info='data.txt')
 arrow=de_arrows('data.txt', 'data.txt', metadata=[metadata]*2, ids=[5, 6])
 #arrow=de_arrow('data.txt', metadata=metadata)
-print(arrow.set_ids([6, 7]).experiment_metadata)
-print(arrow.name)
+print(arrow.get_significant_genes(log2fc=3)['experiment_id'].get_significant_genes())
 
 
 

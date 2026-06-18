@@ -42,6 +42,7 @@ class de_quackling:
         """
         self.db_path = db_path
         self.conn = None
+    
         
         
         
@@ -118,6 +119,10 @@ class de_quackling:
         """Close the DuckDB connection when leaving the context manager."""
         if self.conn:
             self.conn.close()
+
+    def fast_connect(self):
+        self.conn = duckdb.connect(self.db_path)
+        return self
     
     def connect(self):
         """Ensure the database connection is open and return the manager instance."""
