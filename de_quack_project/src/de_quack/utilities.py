@@ -65,6 +65,7 @@ DE_ARROW_QUERIES={
                                 COALESCE(TRY_CAST(e.logCPM AS DOUBLE), log2(e.base_mean + 1), NULL) AS logCPM,
                                 COALESCE(TRY_CAST(e.pvalue AS DOUBLE), NULL) AS pvalue,
                                 COALESCE(TRY_CAST(e.padj AS DOUBLE), NULL) AS padj,
+                                COALESCE(TRY_CAST(e.stat AS DOUBLE), NULL) AS stat,
                                 e.other_info
                         FROM de_arrow_insertion_view as e
                             LEFT JOIN genes ens ON  (
@@ -79,7 +80,8 @@ DE_ARROW_QUERIES={
         'get_important_genes' : "SELECT * FROM arrow_table WHERE abs(log2fc) > $log2fc AND logCPM > $logCPM AND pvalue <= $pvalue",
         'get_downregulated' : "SELECT * FROM arrow_table WHERE log2fc < $log2fc AND logCPM > $logCPM AND pvalue <= $pvalue",
         'get_upregulated' : "SELECT * FROM arrow_table WHERE log2fc > $log2fc AND logCPM > $logCPM AND pvalue <= $pvalue",
-        'set_arrow_id' : "SELECT * REPLACE ($id AS experiment_id) FROM arrow_table"
+        'set_arrow_id' : "SELECT * REPLACE ($id AS experiment_id) FROM arrow_table",
+        'get_gene': 'SELECT * FROM arrow_table WHERE ($gene_symbol IS NULL OR gene_symbol = $gene_symbol) AND ($ensembl_id IS NULL OR gene_symbol = $gene_symbol)'
 
     }
 
@@ -106,25 +108,219 @@ DE_ARROWS_QUERIES={
                                         g.logCPM,
                                         g.pvalue,
                                         g.padj,
+                                        g.stat,
                                         g.other_info
                                 FROM numbered_data e
                                 LEFT JOIN numbered_ids i ON e.r_num = i.r_num
                                 LEFT JOIN gene_results g
                                     ON e.experiment_id = g.experiment_id''',
     'set_ids' : '''             SELECT  
-                                        COALESCE(i.new_id, g.experiment_id),      
+                                        COALESCE(i.new_id, g.experiment_id) AS experiment_id,      
                                         g.gene_symbol,
                                         g.ensembl_id,
                                         g.log2fc,
                                         g.logCPM,
                                         g.pvalue,
                                         g.padj,
+                                        g.stat,
                                         g.other_info
                                 FROM arrow_table g
                                 LEFT JOIN ids_rel i ON i.old_id = g.experiment_id
-                                '''
+                                ''',
+                'get_experiment':   '''
+                                    SELECT  
+                                        g.experiment_id,      
+                                        g.gene_symbol,
+                                        g.ensembl_id,
+                                        g.log2fc,
+                                        g.logCPM,
+                                        g.pvalue,
+                                        g.padj,
+                                        g.stat,
+                                        g.other_info
+                                FROM arrow_table g
+                                WHERE
+                                    g.experiment_id IN $ids
+                                ''',
+                'get_gene': '''
+                            SELECT * FROM arrow_table
+                            WHERE
+                                ($id IS NULL OR experiment_id = $id) AND
+                                ($gene_symbol IS NULL OR gene_symbol = $gene_symbol) AND
+                                ($ensembl_id IS NULL OR ensembl_id = $ensembl_id)'''
 
 
+
+    }
+
+CORE_QUERIES = {
+    'get_experiment': '''
+                        SELECT 
+                            e.experiment_id,
+                            e.model,
+                            e.date,
+                            e.file,
+                            e.experiment_name,
+                            e.contrast,
+                            e.annotation_version,
+                            e.normalization,
+                            e.other_info AS extra_info,
+                            g.experiment_id,
+                            g.gene_symbol,
+                            g.ensembl_id,
+                            g.log2fc,
+                            g.logCPM,
+                            g.pvalue,
+                            g.padj,
+                            g.stat,
+                            g.other_info
+                        FROM experimental_data e
+                        LEFT JOIN gene_results g ON
+                            e.experiment_id = g.experiment_id
+                        
+                        WHERE 
+                            ($experiment_id IS NULL OR e.experiment_id = $experiment_id) AND
+                            ($date IS NULL OR e.date = $date) AND
+                            ($model IS NULL OR e.model LIKE '%' || $model || '%') AND
+                            ($file IS NULL OR e.file LIKE '%' || $file || '%') AND
+                            ($experiment_name IS NULL OR e.experiment_name LIKE '%' || $experiment_name || '%') AND
+                            ($contrast IS NULL OR e.contrast LIKE '%' || $contrast || '%') AND
+                            ($annotation_version IS NULL OR e.annotation_version LIKE '%' || $annotation_version || '%') AND
+                            ($normalization IS NULL OR e.normalization LIKE '%' || $normalization || '%')
+                     ''',
+    'get_significant': '''
+                        SELECT
+                            e.experiment_id,
+                            e.model,
+                            e.date,
+                            e.file,
+                            e.experiment_name,
+                            e.contrast,
+                            e.annotation_version,
+                            e.normalization,
+                            e.other_info AS extra_info,
+                            g.experiment_id,
+                            g.gene_symbol,
+                            g.ensembl_id,
+                            g.log2fc,
+                            g.logCPM,
+                            g.pvalue,
+                            g.padj,
+                            g.stat,
+                            g.other_info
+                        FROM experimental_data e
+                        LEFT JOIN gene_results g ON
+                            e.experiment_id = g.experiment_id
+                        WHERE 
+                            abs(g.log2fc) >= $log2fc AND
+                            g.logCPM >= $logCPM AND
+                            g.padj <= $padj
+                            ''',
+    'get_upregulated': '''
+                        SELECT
+                            e.experiment_id,
+                            e.model,
+                            e.date,
+                            e.file,
+                            e.experiment_name,
+                            e.contrast,
+                            e.annotation_version,
+                            e.normalization,
+                            e.other_info AS extra_info,
+                            g.experiment_id,
+                            g.gene_symbol,
+                            g.ensembl_id,
+                            g.log2fc,
+                            g.logCPM,
+                            g.pvalue,
+                            g.padj,
+                            g.stat,
+                            g.other_info
+                        FROM experimental_data e
+                        LEFT JOIN gene_results g ON
+                            e.experiment_id = g.experiment_id
+                        WHERE 
+                            g.log2fc >= $log2fc AND
+                            g.logCPM >= $logCPM AND
+                            g.padj <= $padj''',
+    'get_downregulated': '''
+                            SELECT
+                            e.experiment_id,
+                            e.model,
+                            e.date,
+                            e.file,
+                            e.experiment_name,
+                            e.contrast,
+                            e.annotation_version,
+                            e.normalization,
+                            e.other_info AS extra_info,
+                            g.experiment_id,
+                            g.gene_symbol,
+                            g.ensembl_id,
+                            g.log2fc,
+                            g.logCPM,
+                            g.pvalue,
+                            g.padj,
+                            g.stat,
+                            g.other_info
+                        FROM experimental_data e
+                        LEFT JOIN gene_results g ON
+                            e.experiment_id = g.experiment_id
+                        WHERE 
+                            g.log2fc <= $log2fc AND
+                            g.logCPM >= $logCPM AND
+                            g.padj <= $padj''',
+    
+    'get_gene': '''
+                    SELECT
+                            e.experiment_id,
+                            e.model,
+                            e.date,
+                            e.file,
+                            e.experiment_name,
+                            e.contrast,
+                            e.annotation_version,
+                            e.normalization,
+                            e.other_info AS extra_info,
+                            g.experiment_id,
+                            g.gene_symbol,
+                            g.ensembl_id,
+                            g.log2fc,
+                            g.logCPM,
+                            g.pvalue,
+                            g.padj,
+                            g.stat,
+                            g.other_info
+                        FROM experimental_data e
+                        LEFT JOIN gene_results g ON
+                            e.experiment_id = g.experiment_id
+                        WHERE 
+                            ($id IS NULL OR g.experiment_id = $id) AND
+                            ($gene_symbol IS NULL OR g.gene_symbol = $id) AND
+                            ($ensembl_id IS NULL OR g.ensembl_id = $ensembl_id)
+                            ''',
+    'find_delete_experiment': '''
+                        SELECT experiment_id FROM experimental_data
+                        WHERE
+                            ($id IS NULL OR experiment_id = $id) AND
+                            ($date IS NULL OR date = $date) AND
+                            ($model IS NULL OR model LIKE '%' || $model || '%') AND
+                            ($file IS NULL OR file LIKE '%' || $file || '%') AND
+                            ($name IS NULL OR experiment_name LIKE '%' || $name || '%') AND
+                            ($contrast IS NULL OR contrast LIKE '%' || $contrast || '%') AND
+                            ($annotation_version IS NULL OR annotation_version LIKE '%' || $annotation_version || '%') AND
+                            ($normalization IS NULL OR normalization LIKE '%' || $normalization || '%')
+                        ''',
+    'delete_experiment': ''' 
+                        DELETE FROM experimental_data
+                        WHERE 
+                            experiment_id = ANY($ids)
+                        ''',
+    'delete_gene_results': '''
+                        DELETE FROM gene_results
+                        WHERE 
+                            experiment_id = ANY($ids)
+                        '''
     }
 
 gene_columns = {
@@ -143,6 +339,9 @@ gene_columns = {
         'padj': [
         'padj', 'p.adj', 'p_adj', 'p.adjusted', 'p_adjusted', 
         'fdr', 'qval', 'qvalue', 'q-value', 'adj.p.val', 'adj.p.value'
+        ],
+        'stat': [
+            'stat', 'f', 'lr', 't'
         ],
         'log2fc': [
             'log2foldchange', 'log2fc', 'log2_fc', 'log2.fc', 'logfc', 'log_fc', 'log.fc'
@@ -204,6 +403,13 @@ class ExperimentMetadata:
         if core_dict['date'] is None:
             self.date, _ = _find_date_and_file(info)
             core_dict['date'] = self.date
+        else:
+            try:
+                core_dict['date'] = datetime.datetime.strptime(core_dict['date'], '%Y-%m-%d').strftime('%Y-%m-%d')
+            except ValueError:
+                _warn(f"Provided date '{core_dict['date']}' is not in the correct format (YYYY-MM-DD). Defaulting to current date.")
+                self.date, _ = _find_date_and_file(info)
+                core_dict['date'] = self.date
         if core_dict['file'] is None:
             _, file_path = _find_date_and_file(info)
             core_dict['file'] = file_path

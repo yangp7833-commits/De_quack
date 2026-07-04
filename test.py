@@ -6,11 +6,11 @@ from duckdb import SQLExpression
 import nanoarrow as na
 df=pd.DataFrame([{'t':1, 'd':2}, {'t':4, 'd':5}])
 metadata={'annotation_version':'ensembl_2', 'experiment_name':'test', 'contrast':'test', 't':'t'}
-#with de_quackling() as db:
-    #db.ingest(metadata=metadata, info='data.txt')
-arrow=de_arrows('data.txt', 'data.txt', metadata=[metadata]*2, ids=[5, 6])
-#arrow=de_arrow('data.txt', metadata=metadata)
-print(arrow.get_significant_genes(log2fc=3)['experiment_id'].get_significant_genes())
+with de_quackling() as db:
+
+    arrow = de_arrow('data1.txt', metadata = metadata)
+    arrow.insert('SQL.duckdb')
+    db.delete_experiment(id = 2)
 
 
 

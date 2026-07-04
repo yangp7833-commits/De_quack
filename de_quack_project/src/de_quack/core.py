@@ -18,6 +18,7 @@ Workflow summary (high level):
 3. `query()` and delete methods accept keyword filters, resolve them to
      concrete SQL clauses, and execute against DuckDB.
 """
+import nanoarrow as na
 import duckdb
 from duckdb import SQLExpression, CaseExpression, ColumnExpression, ConstantExpression, FunctionExpression
 import re
@@ -30,8 +31,11 @@ import sys
 import difflib
 import datetime
 import pandas as pd
-from .exceptions import ProcessingError, DuplicateExperimentError, DuplicateGeneTableError
-from .utilities import gene_columns, ExperimentMetadata
+from .exceptions import ProcessingError, DuplicateExperimentError, DuplicateGeneTableError, DeQuackError
+from .utilities import gene_columns, ExperimentMetadata, CORE_QUERIES
+
+core_queries = CORE_QUERIES
+experiment_columns=['experiment_id', 'model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization', 'extra_info']
 
 class de_quackling:
     def __init__(self, db_path='SQL.duckdb'):
@@ -65,17 +69,16 @@ class de_quackling:
                              experiment_name VARCHAR, contrast VARCHAR, annotation_version VARCHAR, normalization VARCHAR, other_info VARCHAR, data_signature VARCHAR)''')
         
         
-        self.conn.execute('''CREATE SEQUENCE IF NOT EXISTS seq_gene_id START 1''')
         
         self.conn.execute('''CREATE TABLE IF NOT EXISTS gene_results
-                            (id INTEGER PRIMARY KEY DEFAULT nextval('seq_gene_id'),
-                            experiment_id INTEGER,
+                            (experiment_id INTEGER,
                             gene_symbol VARCHAR,
                             ensembl_id VARCHAR,
                             log2fc DOUBLE,
                             logCPM DOUBLE,
                             pvalue DOUBLE,
                             padj DOUBLE,
+                            stat DOUBLE,
                             other_info VARCHAR,
                             FOREIGN KEY (experiment_id) REFERENCES experimental_data(experiment_id))
                             ''')
@@ -95,8 +98,8 @@ class de_quackling:
                         )''')
         self.conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_gene_columns_name ON gene_columns(column_name)')
         self.conn.execute('''INSERT OR REPLACE INTO gene_columns (column_name, alias_names) 
-                        VALUES ('gene_symbol', ?), ('ensembl_id', ?), ('pvalue', ?), ('padj', ?), ('log2fc', ?), ('base_mean', ?), ('logCPM', ?), ('gene_name', ?)''',
-                        (gene_columns['gene_symbol'], gene_columns['ensembl_id'], gene_columns['pvalue'], gene_columns['padj'], gene_columns['log2fc'], gene_columns['base_mean'], gene_columns['logCPM'], gene_columns['gene_name']))
+                        VALUES ('gene_symbol', ?), ('ensembl_id', ?), ('pvalue', ?), ('padj', ?), ('stat', ?), ('log2fc', ?), ('base_mean', ?), ('logCPM', ?), ('gene_name', ?)''',
+                        (gene_columns['gene_symbol'], gene_columns['ensembl_id'], gene_columns['pvalue'], gene_columns['padj'], gene_columns['stat'], gene_columns['log2fc'], gene_columns['base_mean'], gene_columns['logCPM'], gene_columns['gene_name']))
 
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_ref_symbol ON genes (symbol)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS index_ref_ensembl_id ON genes (ensembl_id)")
@@ -166,7 +169,7 @@ class de_quackling:
         all_columns = []
         columns = []
         expressions=[]
-        numeric_columns = {'log2fc', 'logCPM', 'pvalue', 'padj', 'base_mean'}
+        
 
         for incoming_col, real_col in columns_info:
             all_columns.append(incoming_col)
@@ -216,6 +219,8 @@ class de_quackling:
             expressions.append(SQLExpression('NULL').alias('ensembl_id'))
         if 'logCPM' not in columns:
             expressions.append(SQLExpression('NULL').alias('logCPM'))
+        if 'base_mean' not in columns:
+            expressions.append(SQLExpression('NULL').alias('base_mean'))
 
         if not mapped_incoming:
             raise ProcessingError(
@@ -251,12 +256,16 @@ class de_quackling:
             self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
             return
 
+        try:
+            self.conn.register('info', info)
+        except Exception:
+            pass
 
         if class_name == 'dataframe':
             self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
             return
 
-        if class_name == 'Table':
+        if class_name == 'table':
             self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
             return
         
@@ -313,11 +322,11 @@ class de_quackling:
         
         return result[0][0]
 
-    def _insert_gene_results(self, experiment_id, view):
+    def _insert_gene_results(self, experiment_id, view, species = None):
 
 
         self.conn.execute('''
-        INSERT INTO gene_results (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, other_info)
+        INSERT INTO gene_results (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info)
         SELECT ? AS experiment_id,
             COALESCE(ens.symbol, sym.symbol, e.gene_symbol) AS gene_symbol,
             COALESCE(ens.ensembl_id, sym.ensembl_id, e.ensembl_id) AS ensembl_id,
@@ -325,6 +334,7 @@ class de_quackling:
             COALESCE(TRY_CAST(e.logCPM AS DOUBLE), log2(e.base_mean + 1), NULL),
             COALESCE(TRY_CAST(e.pvalue AS DOUBLE), NULL),
             COALESCE(TRY_CAST(e.padj AS DOUBLE), NULL),
+            COALESCE(TRY_CAST(e.stat AS DOUBLE), NULL),
             e.other_info
         FROM view as e
         LEFT JOIN genes ens ON  (
@@ -332,16 +342,17 @@ class de_quackling:
         )
 
         LEFT JOIN genes sym ON (
-            e.gene_symbol IS NOT NULL AND sym.symbol = UPPER(TRIM(e.gene_symbol)) OR
-            e.gene_symbol IS NOT NULL AND sym.prev_symbol IS NOT NULL AND list_contains(sym.prev_symbol, e.gene_symbol)
+            sym.species = ? AND
+            (e.gene_symbol IS NOT NULL AND sym.symbol = UPPER(TRIM(e.gene_symbol)) OR
+            e.gene_symbol IS NOT NULL AND sym.prev_symbol IS NOT NULL AND list_contains(sym.prev_symbol, e.gene_symbol))
             )
         
         
-        ''', (experiment_id,))
+        ''', (experiment_id, species))
 
         self.conn.commit()
         
-    def ingest(self, info, metadata: dict, **config_columns):
+    def ingest(self, info, metadata: dict, species = None, **config_columns):
         """Normalize and ingest differential expression results into DuckDB.
 
         Args:
@@ -365,7 +376,128 @@ class de_quackling:
         data_signature = self._get_data_signature()
         id = self._create_experiment(metadata_fields, data_signature, other_info)
         view=self._create_temp_view()
-        self._insert_gene_results(id, view)
+        self._insert_gene_results(id, view, species)
+    
+    def get_experiment(self, id = None, name = None, model = None, annotation_version = None,  normalization = None, date = None, contrast = None, file = None):
+        try:
+            date = datetime.datetime.strptime(date, '%Y-%m-%d').date() if date else None
+        except ValueError:
+            raise ProcessingError(f"Invalid date format: {date}. Expected format is YYYY-MM-DD.")
+
+        rel = self.conn.sql(core_queries['get_experiment'], params = {
+            'experiment_id': id,
+            'experiment_name': name,
+            'model': model,
+            'annotation_version': annotation_version,
+            'normalization': normalization,
+            'date': date,
+            'contrast': contrast,
+            'file': file
+        })
+        
+        meta_rel = rel.select(', '.join(experiment_columns)).distinct()
+        rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info')
+        metadata_list = [dict(zip(experiment_columns, row)) for row in meta_rel.fetchall()]
+        metadata_fields, ids = _to_metadata(metadata_list)
+        schema = na.Schema(na.Type.INT64)
+        table = na.Array(rel, schema)
+        return _get_de_arrows(table, metadata_fields, ids)
+    
+    def get_significant_genes(self, log2fc = 1, padj = 0.05, logCPM = 1):
+        rel = self.conn.sql(core_queries['get_significant'], 
+        params = {
+        'log2fc': log2fc,
+        'padj': padj,
+        'logCPM': logCPM
+        })
+        meta_rel = rel.select(', '.join(experiment_columns)).distinct()
+        rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info')
+        metadata_list = [dict(zip(experiment_columns, row)) for row in meta_rel.fetchall()]
+        metadata_fields, ids = _to_metadata(metadata_list)
+        schema = na.Schema(na.Type.INT64)
+        table = na.Array(rel, schema)
+        return _get_de_arrows(table, metadata_fields, ids)
+
+    def get_upregulated(self, log2fc = 1, padj = 0.05, logCPM = 1):
+        rel = self.conn.sql(core_queries['get_upregulated'], 
+        params = {
+        'log2fc': log2fc,
+        'padj': padj,
+        'logCPM': logCPM
+        })
+        meta_rel = rel.select(', '.join(experiment_columns)).distinct()
+        rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info')
+        metadata_list = [dict(zip(experiment_columns, row)) for row in meta_rel.fetchall()]
+        metadata_fields, ids = _to_metadata(metadata_list)
+        schema = na.Schema(na.Type.INT64)
+        table = na.Array(rel, schema)
+        return _get_de_arrows(table, metadata_fields, ids)
+    
+    def get_downregulated(self, log2fc = -1, padj = 0.05, logCPM = 1):
+        rel = self.conn.sql(core_queries['get_downregulated'], 
+        params = {
+        'log2fc': log2fc,
+        'padj': padj,
+        'logCPM': logCPM
+        })
+        meta_rel = rel.select(', '.join(experiment_columns)).distinct()
+        rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info')
+        metadata_list = [dict(zip(experiment_columns, row)) for row in meta_rel.fetchall()]
+        metadata_fields, ids = _to_metadata(metadata_list)
+        schema = na.Schema(na.Type.INT64)
+        table = na.Array(rel, schema)
+        return _get_de_arrows(table, metadata_fields, ids)
+    
+    def get_gene(self, gene_symbol = None, ensembl_id = None, id = None):
+        rel = self.conn.sql(core_queries['get_gene'], 
+        params = {
+        'gene_symbol': gene_symbol,
+        'ensembl_id': ensembl_id,
+        'id': id
+        })
+        meta_rel = rel.select(', '.join(experiment_columns)).distinct()
+        rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info')
+        metadata_list = [dict(zip(experiment_columns, row)) for row in meta_rel.fetchall()]
+        metadata_fields, ids = _to_metadata(metadata_list)
+        schema = na.Schema(na.Type.INT64)
+        table = na.Array(rel, schema)
+        return _get_de_arrows(table, metadata_fields, ids)
+
+    def delete_experiment(self, id = None, name = None, model = None, annotation_version = None,  normalization = None, date = None, contrast = None, file = None):
+        try:
+            date = datetime.datetime.strptime(date, '%Y-%m-%d').date() if date else None
+        except ValueError:
+            raise ProcessingError(f"Invalid date format: {date}. Expected format is YYYY-MM-DD.")
+        try:
+            self.conn.begin()
+            ids = self.conn.sql(core_queries['find_delete_experiment'], params = {
+                'id': id,
+                'name': name,
+                'model': model,
+                'annotation_version': annotation_version,
+                'normalization': normalization,
+                'date': date,
+                'contrast': contrast,
+                'file': file
+            }).fetchall()
+            ids = [row[0] for row in ids]
+            self.conn.sql(core_queries['delete_gene_results'], params = {
+                'ids': ids})
+            self.conn.commit()
+            self.conn.sql(core_queries['delete_experiment'], params = {
+                'ids': ids})
+            self.conn.commit()
+        
+            
+        finally:
+            self.conn.close()
+
+
+
+    
+        
+        
+
     
 
     def close(self):
@@ -373,17 +505,30 @@ class de_quackling:
         if self.conn:
             self.conn.close()
             self.conn = None
-    
 
 
-
-            
-       
-
-        
-    
     def execute_raw(self, query, values=None):
         return self.conn.execute(query, (values,))
+    
+def _get_de_arrows(arrows, metadata, ids):
+    from .arrow import de_arrows, de_arrow
+    if len(ids) == 1:
+        return de_arrow._from_arrow(arrows, metadata, ids)
+    return de_arrows._from_arrow(arrows, metadata, ids)
+
+def _to_metadata(metadata_list):
+    for meta in metadata_list:
+        if meta.get('extra_info'):
+            try:
+                extra = json.loads(meta['extra_info'])
+                for key, value in extra.items():
+                    meta[key] = value
+            except json.JSONDecodeError:
+                pass
+        meta.pop('extra_info', None)
+    ids = [meta.pop('experiment_id') for meta in metadata_list]
+    metadata_fields = {exp_id: meta for meta, exp_id in zip(metadata_list, ids)}
+    return metadata_fields, ids
 
 
 
