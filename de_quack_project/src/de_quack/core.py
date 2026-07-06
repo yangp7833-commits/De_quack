@@ -271,21 +271,55 @@ class de_quackling:
         
 
         raise ProcessingError(f'type {type(info)} is not supported. Provide a pandas DataFrame, list of dicts, or path to a CSV/TSV/Parquet file.')
-
-
     
-
-    def initialize_gene_table(self, species):
-        """Load species-specific reference gene annotation data into the database.
+    def initialize_gene_table(self, species = 'human'):
+        """Initialize the reference gene table for a given species.
 
         Currently supports `human` by downloading HGNC gene metadata and
         populating the `genes` reference table for symbol and Ensembl matching.
         """
-        if species == 'human':
-            url = 'https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt'
+        if species.lower() == 'human':
+            self._insert_human_genes()
+        elif species.lower() == 'mouse':
+            self._insert_mouse_genes()
         else:
-            raise ProcessingError(f"Unsupported species '{species}'. Only 'human' is currently supported.")
+            raise ProcessingError(f"Species '{species}' is not supported. Only 'human' is currently supported.")
+    
+    def _insert_mouse_genes(self):
+        """Load species-specific reference gene annotation data into the database.
 
+        Currently supports `mouse` by downloading MGI gene metadata and
+        populating the `genes` reference table for symbol and Ensembl matching."""
+
+        url = 'https://www.informatics.jax.org/downloads/reports/MGI_Gene_Model_Coord.rpt'
+        try:
+            self.conn.execute('''
+            INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
+            SELECT 
+                csv_data.column03 as symbol, 
+                CAST(regexp_replace(csv_data.column00, '^MGI:', '', 'i') AS INTEGER) AS id, 
+                csv_data.column10 as ensembl_id,
+                NULL AS alias_symbol, 
+                NULL AS prev_symbol,
+                'mouse' as species 
+            FROM read_csv_auto(?, strict_mode = false, delim = '\t', skip = 2) AS csv_data
+            ''', (url,))
+            self.conn.commit()
+
+        except duckdb.ConstraintException as e:
+            raise DuplicateGeneTableError(
+                'Gene reference data appears to have already been loaded or the gene table has duplicate entries.'
+            ) from e
+
+    
+
+    def _insert_human_genes(self):
+        """Load species-specific reference gene annotation data into the database.
+
+        Currently supports `human` by downloading HGNC gene metadata and
+        populating the `genes` reference table for symbol and Ensembl matching."""
+
+        url = 'https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt'
         try:
             self.conn.execute('''
             INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
@@ -352,7 +386,7 @@ class de_quackling:
 
         self.conn.commit()
         
-    def ingest(self, info, metadata: dict, species = None, **config_columns):
+    def ingest(self, info, metadata: dict, species = 'human', **config_columns):
         """Normalize and ingest differential expression results into DuckDB.
 
         Args:
@@ -403,12 +437,13 @@ class de_quackling:
         table = na.Array(rel, schema)
         return _get_de_arrows(table, metadata_fields, ids)
     
-    def get_significant_genes(self, log2fc = 1, padj = 0.05, logCPM = 1):
+    def get_significant_genes(self, log2fc = 1, padj = 0.05, logCPM = 1, id = None):
         rel = self.conn.sql(core_queries['get_significant'], 
         params = {
         'log2fc': log2fc,
         'padj': padj,
-        'logCPM': logCPM
+        'logCPM': logCPM,
+        'id': id
         })
         meta_rel = rel.select(', '.join(experiment_columns)).distinct()
         rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info')
@@ -418,12 +453,13 @@ class de_quackling:
         table = na.Array(rel, schema)
         return _get_de_arrows(table, metadata_fields, ids)
 
-    def get_upregulated(self, log2fc = 1, padj = 0.05, logCPM = 1):
+    def get_upregulated(self, log2fc = 1, padj = 0.05, logCPM = 1, id = None):
         rel = self.conn.sql(core_queries['get_upregulated'], 
         params = {
         'log2fc': log2fc,
         'padj': padj,
-        'logCPM': logCPM
+        'logCPM': logCPM,
+        'id': id
         })
         meta_rel = rel.select(', '.join(experiment_columns)).distinct()
         rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info')
@@ -433,12 +469,13 @@ class de_quackling:
         table = na.Array(rel, schema)
         return _get_de_arrows(table, metadata_fields, ids)
     
-    def get_downregulated(self, log2fc = -1, padj = 0.05, logCPM = 1):
+    def get_downregulated(self, log2fc = -1, padj = 0.05, logCPM = 1, id = None):
         rel = self.conn.sql(core_queries['get_downregulated'], 
         params = {
         'log2fc': log2fc,
         'padj': padj,
-        'logCPM': logCPM
+        'logCPM': logCPM,
+        'id': id
         })
         meta_rel = rel.select(', '.join(experiment_columns)).distinct()
         rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info')
@@ -486,11 +523,10 @@ class de_quackling:
             self.conn.commit()
             self.conn.sql(core_queries['delete_experiment'], params = {
                 'ids': ids})
+        finally:
             self.conn.commit()
         
             
-        finally:
-            self.conn.close()
 
 
 

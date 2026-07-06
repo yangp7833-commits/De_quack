@@ -214,7 +214,8 @@ CORE_QUERIES = {
                         WHERE 
                             abs(g.log2fc) >= $log2fc AND
                             g.logCPM >= $logCPM AND
-                            g.padj <= $padj
+                            g.padj <= $padj AND
+                            ($id IS NULL OR g.experiment_id = $id)
                             ''',
     'get_upregulated': '''
                         SELECT
@@ -242,7 +243,8 @@ CORE_QUERIES = {
                         WHERE 
                             g.log2fc >= $log2fc AND
                             g.logCPM >= $logCPM AND
-                            g.padj <= $padj''',
+                            g.padj <= $padj AND
+                            ($id IS NULL OR g.experiment_id = $id)''',
     'get_downregulated': '''
                             SELECT
                             e.experiment_id,
@@ -269,7 +271,8 @@ CORE_QUERIES = {
                         WHERE 
                             g.log2fc <= $log2fc AND
                             g.logCPM >= $logCPM AND
-                            g.padj <= $padj''',
+                            g.padj <= $padj AND
+                            ($id IS NULL OR g.experiment_id = $id)''',
     
     'get_gene': '''
                     SELECT
