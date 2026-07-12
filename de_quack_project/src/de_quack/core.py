@@ -32,10 +32,17 @@ import difflib
 import datetime
 import pandas as pd
 from .exceptions import ProcessingError, DuplicateExperimentError, DuplicateGeneTableError, DeQuackError
-from .utilities import gene_columns, ExperimentMetadata, CORE_QUERIES
-
+from .utilities import gene_columns, ExperimentMetadata, CORE_QUERIES, gene_mapping
+import time
+_gene_mapping_queries = gene_mapping
 core_queries = CORE_QUERIES
 experiment_columns=['experiment_id', 'model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization', 'extra_info']
+
+_GENE_ALIAS_TO_COLUMN = {
+    alias.lower(): canonical
+    for canonical, aliases in gene_columns.items()
+    for alias in aliases + [canonical]
+}
 
 class de_quackling:
     def __init__(self, db_path='SQL.duckdb'):
@@ -93,13 +100,6 @@ class de_quackling:
                             PRIMARY KEY (id, species) 
                             )''')
         
-        self.conn.execute('''CREATE TABLE IF NOT EXISTS gene_columns 
-                        (column_name VARCHAR, alias_names VARCHAR[]
-                        )''')
-        self.conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_gene_columns_name ON gene_columns(column_name)')
-        self.conn.execute('''INSERT OR REPLACE INTO gene_columns (column_name, alias_names) 
-                        VALUES ('gene_symbol', ?), ('ensembl_id', ?), ('pvalue', ?), ('padj', ?), ('stat', ?), ('log2fc', ?), ('base_mean', ?), ('logCPM', ?), ('gene_name', ?)''',
-                        (gene_columns['gene_symbol'], gene_columns['ensembl_id'], gene_columns['pvalue'], gene_columns['padj'], gene_columns['stat'], gene_columns['log2fc'], gene_columns['base_mean'], gene_columns['logCPM'], gene_columns['gene_name']))
 
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_ref_symbol ON genes (symbol)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS index_ref_ensembl_id ON genes (ensembl_id)")
@@ -148,41 +148,31 @@ class de_quackling:
     def _create_temp_view(self): 
         from duckdb import SQLExpression
 
-    
-        columns_info = self.conn.execute(f'''
-            SELECT 
-                t.column_name AS incoming_col, 
-                g.column_name AS real_col
-            FROM duckdb_columns() AS t
-            LEFT JOIN gene_columns AS g
-                ON list_contains(g.alias_names, lower(t.column_name))
-            WHERE t.table_name = 'preprocessed_data'
-            ORDER BY t.column_index
-        ''').fetchall()
+        temp_view = self.conn.table('preprocessed_data')
+        columns_info = [(column_name, _GENE_ALIAS_TO_COLUMN.get(column_name.lower())) for column_name in temp_view.columns]
 
         if not columns_info:
             raise ProcessingError("The registered table contains no columns.")
-      
-        temp_view = self.conn.table('preprocessed_data')
+
+        has_gene_symbol = any(real_col == 'gene_symbol' for _, real_col in columns_info)
 
         mapped_incoming = []
         all_columns = []
         columns = []
         expressions=[]
-        
 
         for incoming_col, real_col in columns_info:
             all_columns.append(incoming_col)
             # real_col may be None if no alias matched
             if real_col == 'gene_name':
                 # sample a real cell value from this incoming column (avoid placeholder misuse)
-                sample = temp_view.select(ColumnExpression(incoming_col)).limit(1).fetchall()
+                sample = temp_view.select(ColumnExpression(incoming_col)).limit(1).fetchone()
                 sample_val = sample[0] if sample is not None else None
                 if sample_val is not None and re.match(r'^ENS', str(sample_val)):
                     mapped_incoming.append(incoming_col)
                     expressions.append(ColumnExpression(incoming_col).alias('ensembl_id'))
                     columns.append('ensembl_id')
-                elif 'gene_symbol' not in [col[0] for col in columns_info]:
+                elif not has_gene_symbol:
                     mapped_incoming.append(incoming_col)
                     expressions.append(ColumnExpression(incoming_col).alias('gene_symbol'))
                     columns.append('gene_symbol')
@@ -199,6 +189,10 @@ class de_quackling:
                 'No recognizable gene result columns were found in the input. '
                 'Verify the header names against gene_columns aliases.'
             )
+        for col in ['gene_symbol', 'ensembl_id', 'log2fc', 'padj', 'pvalue', 'stat', 'logCPM']:
+            if col not in columns:
+                expressions.append(ConstantExpression(None).alias(col))
+                columns.append(col)
     
         extra_columns = [col for col in all_columns if col not in mapped_incoming]
         if extra_columns:
@@ -252,7 +246,8 @@ class de_quackling:
         class_name = info.__class__.__name__.lower()
         self.conn.execute('DROP VIEW IF EXISTS preprocessed_data')
 
-        if isinstance(info, de_arrow):
+        if class_name == 'de_arrow':
+            self.conn.register('info', info._table)
             self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
             return
 
@@ -291,21 +286,10 @@ class de_quackling:
         Currently supports `mouse` by downloading MGI gene metadata and
         populating the `genes` reference table for symbol and Ensembl matching."""
 
-        url = 'https://www.informatics.jax.org/downloads/reports/MGI_Gene_Model_Coord.rpt'
+       
         try:
-            self.conn.execute('''
-            INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
-            SELECT 
-                csv_data.column03 as symbol, 
-                CAST(regexp_replace(csv_data.column00, '^MGI:', '', 'i') AS INTEGER) AS id, 
-                csv_data.column10 as ensembl_id,
-                NULL AS alias_symbol, 
-                NULL AS prev_symbol,
-                'mouse' as species 
-            FROM read_csv_auto(?, strict_mode = false, delim = '\t', skip = 2) AS csv_data
-            ''', (url,))
+            self.conn.execute(_gene_mapping_queries['mouse_genes'])
             self.conn.commit()
-
         except duckdb.ConstraintException as e:
             raise DuplicateGeneTableError(
                 'Gene reference data appears to have already been loaded or the gene table has duplicate entries.'
@@ -319,19 +303,8 @@ class de_quackling:
         Currently supports `human` by downloading HGNC gene metadata and
         populating the `genes` reference table for symbol and Ensembl matching."""
 
-        url = 'https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt'
         try:
-            self.conn.execute('''
-            INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
-            SELECT 
-                csv_data.symbol, 
-                CAST(regexp_replace(csv_data.hgnc_id, '^hgnc:', '', 'i') AS INTEGER) AS id, 
-                csv_data.ensembl_gene_id, 
-                string_split(UPPER(COALESCE(csv_data.alias_symbol, '')), '|') as alias_symbol, 
-                string_split(UPPER(COALESCE(csv_data.prev_symbol, '')), '|') as prev_symbol, 
-                'human' as species 
-            FROM read_csv_auto(?) AS csv_data
-            ''', (url,))
+            self.conn.execute(_gene_mapping_queries['human_genes'])
             self.conn.commit()
 
         except duckdb.ConstraintException as e:
@@ -404,13 +377,41 @@ class de_quackling:
         `gene_results` with canonical symbol/Ensembl mapping.
         """
 
+        start_time = time.perf_counter()
         metadata_fields, other_info = ExperimentMetadata().to_dict(metadata, info)
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        print(elapsed_time)
+        
+        start_time = time.perf_counter()
+        self._preprocess(info) 
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        print(elapsed_time)
 
-        self._preprocess(info)
+        start_time = time.perf_counter()
         data_signature = self._get_data_signature()
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        print(elapsed_time)
+
+        start_time = time.perf_counter()
         id = self._create_experiment(metadata_fields, data_signature, other_info)
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        print(elapsed_time)
+
+        start_time = time.perf_counter()
         view=self._create_temp_view()
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        print(elapsed_time)
+
+        start_time = time.perf_counter()
         self._insert_gene_results(id, view, species)
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        print(elapsed_time)
     
     def get_experiment(self, id = None, name = None, model = None, annotation_version = None,  normalization = None, date = None, contrast = None, file = None):
         try:
@@ -454,6 +455,8 @@ class de_quackling:
         return _get_de_arrows(table, metadata_fields, ids)
 
     def get_upregulated(self, log2fc = 1, padj = 0.05, logCPM = 1, id = None):
+
+        start_time = time.perf_counter()
         rel = self.conn.sql(core_queries['get_upregulated'], 
         params = {
         'log2fc': log2fc,
@@ -461,12 +464,27 @@ class de_quackling:
         'logCPM': logCPM,
         'id': id
         })
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        print(elapsed_time)
+
+        start_time = time.perf_counter()
         meta_rel = rel.select(', '.join(experiment_columns)).distinct()
-        rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info')
+        rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info').pl()
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        print(elapsed_time)
+
         metadata_list = [dict(zip(experiment_columns, row)) for row in meta_rel.fetchall()]
         metadata_fields, ids = _to_metadata(metadata_list)
         schema = na.Schema(na.Type.INT64)
-        table = na.Array(rel, schema)
+
+        start_time = time.perf_counter()
+        print(rel)
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        print(elapsed_time)
+
         return _get_de_arrows(table, metadata_fields, ids)
     
     def get_downregulated(self, log2fc = -1, padj = 0.05, logCPM = 1, id = None):

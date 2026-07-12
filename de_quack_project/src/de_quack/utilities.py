@@ -9,6 +9,8 @@ import warnings
 import logging
 import json
 
+_DATE_PATTERN = re.compile(r'(\d{4}-\d{2}-\d{2})')
+
 
 # Configure logger with nice formatting
 def _setup_logger():
@@ -77,12 +79,24 @@ DE_ARROW_QUERIES={
                             e.gene_symbol IS NOT NULL AND sym.prev_symbol IS NOT NULL AND list_contains(sym.prev_symbol, e.gene_symbol)
                     )''',
         
-        'get_important_genes' : "SELECT * FROM arrow_table WHERE abs(log2fc) > $log2fc AND logCPM > $logCPM AND pvalue <= $pvalue",
-        'get_downregulated' : "SELECT * FROM arrow_table WHERE log2fc < $log2fc AND logCPM > $logCPM AND pvalue <= $pvalue",
-        'get_upregulated' : "SELECT * FROM arrow_table WHERE log2fc > $log2fc AND logCPM > $logCPM AND pvalue <= $pvalue",
-        'set_arrow_id' : "SELECT * REPLACE ($id AS experiment_id) FROM arrow_table",
-        'get_gene': 'SELECT * FROM arrow_table WHERE ($gene_symbol IS NULL OR gene_symbol = $gene_symbol) AND ($ensembl_id IS NULL OR gene_symbol = $gene_symbol)'
-
+    'map_mouse': '''SELECT 
+                        *
+                        FROM gene_table
+                        LEFT JOIN csv_data ON gene_table.symbol = csv_data.column03 OR gene_table.ensembl_id = csv_data.column10
+                        WITH csv_data AS (
+                        SELECT 
+                            csv_data.column03 as symbol,
+                            CAST(regexp_replace(csv_data.column00, '^MGI:', '', 'i') AS INTEGER) AS id,
+                            csv_data.column10 as ensembl_id
+                        FROM
+                        read_csv_auto('https://www.informatics.jax.org/downloads/reports/MGI_Gene_Model_Coord.rpt', strict_mode = false, delim = '\t', skip = 2))
+                ''',
+    'map_human': '''SELECT 
+                csv_data.symbol as gene_symbol,
+                csv_data.ensembl_gene_id as ensembl_id
+                FROM read_csv_auto('https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt') AS csv_data
+                '''
+            
     }
 
 DE_ARROWS_QUERIES={
@@ -326,6 +340,30 @@ CORE_QUERIES = {
                         '''
     }
 
+gene_mapping = {'mouse_genes': '''
+            INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
+            SELECT 
+                csv_data.column03 as symbol, 
+                CAST(regexp_replace(csv_data.column00, '^MGI:', '', 'i') AS INTEGER) AS id, 
+                csv_data.column10 as ensembl_id,
+                NULL AS alias_symbol, 
+                NULL AS prev_symbol,
+                'mouse' as species 
+            FROM read_csv_auto('https://www.informatics.jax.org/downloads/reports/MGI_Gene_Model_Coord.rpt', strict_mode = false, delim = '\t', skip = 2) AS csv_data
+            ''',
+            'human_genes': '''
+            INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
+            SELECT 
+                csv_data.symbol, 
+                CAST(regexp_replace(csv_data.hgnc_id, '^hgnc:', '', 'i') AS INTEGER) AS id, 
+                csv_data.ensembl_gene_id AS ensembl_id, 
+                string_split(UPPER(COALESCE(csv_data.alias_symbol, '')), '|') as alias_symbol, 
+                string_split(UPPER(COALESCE(csv_data.prev_symbol, '')), '|') as prev_symbol, 
+                'human' as species 
+            FROM read_csv_auto('https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt') AS csv_data
+            '''
+            }
+
 gene_columns = {
         'gene_symbol': [
             'gene_symbol', 'symbol', 'hgnc_symbol', 'genesymbol',
@@ -363,8 +401,7 @@ def _find_date_and_file(info):
         return datetime.datetime.now().strftime('%Y-%m-%d'), 'in-memory object'
 
     if os.path.isfile(info):
-        date_pattern = re.compile(r'(\d{4}-\d{2}-\d{2})') 
-        match = date_pattern.search(info) # first tries to find the date using regex on the file name
+        match = _DATE_PATTERN.search(info) # first tries to find the date using regex on the file name
         file_path=os.path.abspath(info)
         if match:
             return datetime.datetime.strptime(match.group(1), '%Y-%m-%d'), file_path
@@ -392,17 +429,29 @@ class ExperimentMetadata:
 
     def to_dict(self, metadata: dict, info):
         """Convert the dataclass to a dictionary, including additional_info."""
+        field_names = [f.name for f in fields(self)]
+        field_name_set = set(field_names)
         for key, value in metadata.items():
             cleaned_key = key.lower().strip().replace(' ', '_')
-            if cleaned_key in [f.name for f in fields(self)]:
+            if cleaned_key in field_name_set:
                 setattr(self, cleaned_key, value)
-            elif difflib.get_close_matches(cleaned_key, [f.name for f in fields(self)], n=1, cutoff=0.8):
-                closest_match = difflib.get_close_matches(cleaned_key, [f.name for f in fields(self)], n=1, cutoff=0.8)[0]
-                setattr(self, closest_match, value)
             else:
-                self.additional_info[key] = value
-            
-        core_dict = asdict(self)
+                matches = difflib.get_close_matches(cleaned_key, field_names, n=1, cutoff=0.8)
+                if matches:
+                    setattr(self, matches[0], value)
+                else:
+                    self.additional_info[key] = value
+
+        core_dict = {
+            'experiment_name': self.experiment_name,
+            'date': self.date,
+            'contrast': self.contrast,
+            'file': self.file,
+            'normalization': self.normalization,
+            'model': self.model,
+            'annotation_version': self.annotation_version,
+            'additional_info': dict(self.additional_info),
+        }
         if core_dict['date'] is None:
             self.date, _ = _find_date_and_file(info)
             core_dict['date'] = self.date
@@ -419,15 +468,13 @@ class ExperimentMetadata:
         if core_dict['experiment_name'] is None and 'file' in self.additional_info:
             self.experiment_name = core_dict['file']
             core_dict['experiment_name'] = self.experiment_name 
-        for field in [f.name for f in fields(self)]:
-            if core_dict[field] is None:
-                _warn(f'{field} is not provided in the metadata. {field} has been defaulted to unknown')
-                core_dict[field] = 'unknown'
-        
-        if core_dict['additional_info'] is None:
-            core_dict['additional_info'] = {}
+        for field_name in field_names:
+            if core_dict[field_name] is None:
+                _warn(f'{field_name} is not provided in the metadata. {field_name} has been defaulted to unknown')
+                core_dict[field_name] = 'unknown'
+
         other_info = core_dict.pop("additional_info")
-            
+
         return core_dict, json.dumps(other_info)
 
 

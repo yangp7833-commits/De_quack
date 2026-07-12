@@ -1,6 +1,6 @@
 import nanoarrow as na
 from .core import de_quackling
-from .utilities import ExperimentMetadata, DE_ARROW_QUERIES, DE_ARROWS_QUERIES
+from .utilities import ExperimentMetadata, DE_ARROW_QUERIES, DE_ARROWS_QUERIES, gene_columns, gene_mapping
 import duckdb
 from .exceptions import DeQuackError, ProcessingError, DuplicateExperimentError, DuplicateGeneTableError
 import json
@@ -8,11 +8,19 @@ import uuid
 import re
 import os
 import sys
-import shutil
+from importlib import resources
 import hashlib
+import time
+import polars as pl
 _de_arrow_queries=DE_ARROW_QUERIES
 _de_arrows_queries=DE_ARROWS_QUERIES
-_gene_columns = ['padj', 'p_value', 'log2fc', 'gene_symbol', 'ensembl_id', 'logCPM', 'stat', 'experiment_id']
+_gene_mapping_queries = gene_mapping
+_GENE_ALIAS_TO_COLUMN = {
+    alias.lower(): canonical
+    for canonical, aliases in gene_columns.items()
+    for alias in aliases + [canonical]
+}
+_gene_columns = ['gene_symbol', 'ensembl_id', 'log2fc', 'logCPM', 'pvalue', 'padj', 'stat']
 class de_arrow:
     
     def __init__(self, info, id = None, metadata=None,  heal_genes = False, species = None, **fields):
@@ -26,7 +34,6 @@ class de_arrow:
             id = 1
         
         self._table, self.experiment_metadata = self.__class__._to_de_arrow(info, metadata, id, heal_genes = heal_genes, species = None)
-        self.columns = _get_array_columns(self._table)
         self.name = _get_experiment_attribute(self.experiment_metadata, 'experiment_name', id)
         self.annotation_version = _get_experiment_attribute(self.experiment_metadata, 'annotation_version', id)
         self.contrast = _get_experiment_attribute(self.experiment_metadata, 'contrast', id)
@@ -50,36 +57,8 @@ class de_arrow:
             setattr(table, name, value)
     
     def __getitem__(self, key):
-        if isinstance(key, int):
-            return self._table[key]
-        elif isinstance(key, str):
-            if key in self.columns:
-                de = de_quackling(get_unique_conn()).fast_connect()
-                try:
-                    arrow_table=self._table
-                    arrow_table = de.conn.sql(f"SELECT {key} FROM arrow_table")
-                    arrow_table = na.Array(arrow_table)
-                    columns = [key]
-                    arrow_table = self._from_arrow(arrow_table, self.experiment_metadata, self.id, columns)
-                    return arrow_table
-                finally:
-                    de.conn.close()
-            else:
-                raise KeyError(f'{key} is not in the table')
-        elif isinstance(key, list):
-            for column in key:
-                if column not in self.columns:
-                    raise KeyError(f'{column} is not in the table')
-            de = de_quackling(get_unique_conn()).fast_connect()
-            try:
-                arrow_table = self._table
-                arrow_table = de.conn.sql(f"SELECT COLUMNS({key}) FROM arrow_table")
-                arrow_table = na.Array(arrow_table)
-                columns = key
-                arrow_table = self._from_arrow(arrow_table, self.experiment_metadata, self.id, columns)
-                return arrow_table
-            finally:
-                de.conn.close()
+        return self._table[key]
+       
 
     def __len__(self):
         return len(self._table)
@@ -88,34 +67,32 @@ class de_arrow:
         return repr(self._table)
     
     def __str__(self):
-        title = f'arrow.de_arrow<ID {self.id} | {len(self._table)} Rows>'
-        return _format_arrow_table(self._table, self.columns, title=title)
+        return(str(self._table))
     
 
     
     @classmethod
     def _to_de_arrow(self, info, metadata, experiment_id=None, heal_genes=False, species = None):
-        de=de_quackling(get_unique_conn()).connect()
-        try:
-            if heal_genes == True:
-                if species is None:
-                    de.initialize_gene_table('human')
-                else:
-                    de.initialize_gene_table(species)
-            metadata_fields, extra_info=ExperimentMetadata().to_dict(metadata, info)
-            for key, value in json.loads(extra_info).items():
-                metadata_fields[key]=value
-            metadata_fields={experiment_id: metadata_fields}
-            de._preprocess(info)
-            de_arrow_insertion_view=de._create_temp_view()
-            
-            rel=de.conn.sql(_de_arrow_queries['insert_to_de_arrow'], params={'id':experiment_id})
-            schema=na.Schema(na.Type.INT64)
-            table=na.Array(rel, schema)
-            return table, metadata_fields
-        finally:
-            de.conn.close()
-    
+        df = _to_polars_table(info)
+        metadata_fields, extra_info=ExperimentMetadata().to_dict(metadata, info)
+        for key, value in json.loads(extra_info).items():
+            metadata_fields[key]=value
+        metadata_fields={experiment_id: metadata_fields}
+        df = _order_columns(df)
+        if heal_genes == True:
+            if species is None:
+                species = 'human'
+            start_time = time.perf_counter()
+            df = _heal_genes(df, species)
+            end_time = time.perf_counter()
+            elapsed_time = end_time - start_time
+            print(f"Healing genes took {elapsed_time:.2f} seconds.")
+        df = df.insert_column(0, pl.lit(experiment_id).alias('experiment_id'))
+        return df, metadata_fields
+
+
+   
+
     @classmethod
     def _from_arrow(cls, arrow_array, metadata, id, columns = None):
         """
@@ -135,7 +112,6 @@ class de_arrow:
         """
         instance = cls.__new__(cls)
         instance._table = arrow_array
-        instance.columns = _get_array_columns(arrow_array)
         instance.experiment_metadata = metadata
         instance.name = _get_experiment_attribute(metadata, 'experiment_name', id)
         instance.annotation_version = _get_experiment_attribute(metadata, 'annotation_version', id)
@@ -143,10 +119,6 @@ class de_arrow:
         instance.file = _get_experiment_attribute(metadata, 'file', id)
         instance.date = _get_experiment_attribute(metadata, 'date', id)
         instance.model = _get_experiment_attribute(metadata, 'model', id)
-        if columns is not None:
-            instance.columns = columns
-        else:
-            instance.columns = _get_array_columns(arrow_array)
         instance.id = id
         return instance
     
@@ -332,6 +304,33 @@ class de_arrow:
             raise DeDuckError('Panda and PyArrow need to be imported in order to convert to dataframe')
         
         return pd.DataFrame.from_arrow(self._table)
+
+
+
+def _get_gene_table(species):
+    folder = resources.files('de_quack') / 'gene_tables'
+    return folder / f'{species}_genes.parquet'
+
+def _heal_genes(df, species):
+    cursor = duckdb.connect(get_unique_conn())
+    
+    genes = pl.scan_parquet(_get_gene_table(species)).select('symbol', 'ensembl_id')
+    df = df.lazy()
+    df = df.with_columns(pl.col('gene_symbol').fill_null(pl.lit('')).alias('gene_symbol'))
+    df = df.join(genes, on = 'ensembl_id', how = 'left')
+    df = df.with_columns(pl.col('ensembl_id').fill_null(pl.lit('')).alias('ensembl_id'))
+    df = df.join(
+    genes,
+    left_on="gene_symbol",  
+    right_on="symbol",
+    how="left", 
+    suffix="_on_symbol"
+    )
+    final_df = df.select(pl.coalesce(['symbol', 'gene_symbol']).alias('gene_symbol'),
+                                pl.coalesce(['ensembl_id', 'ensembl_id_on_symbol']).alias('ensembl_id'),
+                                pl.all().exclude(['symbol', 'ensembl_id_on_symbol', 'gene_symbol', 'ensembl_id']))
+    cursor.close()
+    return final_df.collect()
         
 
 class de_arrows:
@@ -346,7 +345,7 @@ class de_arrows:
             return de_arrow(args[0], metadata=metadata[0])
         return super().__new__(cls)
     
-    def __init__(self, *args, metadata = None, ids=None, heal_genes = False, species = None):
+    def __init__(self, *args, metadata = None, ids=None, heal_genes = False, species = None, keep_ids = False):
         """Initialize a de_arrows object with multiple differential expression tables.
         
         Parameters
@@ -356,6 +355,7 @@ class de_arrows:
         metadata : list of dict
             List of metadata dictionaries, one for each table.
         """
+
         
         none_de_arrow = [table for table in args if not isinstance(table, de_arrow) and not isinstance(table, de_arrows)]
         if len(args) < 1:
@@ -365,18 +365,26 @@ class de_arrows:
                 metadata = [metadata]
             else:
                 raise DeQuackError('Metadata must be provided as a list of dictionaries')
-        if ids is not None:
+        if len(metadata) != len(none_de_arrow):
+            raise DeQuackError('Number of metadata dictionaries does not match number of tables')
+        if keep_ids == True:
             if len(ids) != len(none_de_arrow):
                 raise DeQuackError('Number of ids provided does not match number of tables')
             if isinstance(ids, int) and len(none_de_arrow) == 1:
                 ids = [ids]
-            _check_ids(ids)
+            if ids is None:
+                ids = [i + 1 for i in range(len(args))]
+        else:
+            if ids is None:
+                ids = [i + 1 for i in range(len(args))]
+            if len(ids) != len(args):
+                raise DeQuackError('Number of ids provided does not match number of tables')
+        _check_ids(ids)
         
         
         self._table, self.experiment_metadata, ids = self.__class__._from_tables(*args, metadata=metadata, ids=ids, heal_genes = heal_genes, species = species)
         self.id = ids
         self.name = _get_experiment_attribute(self.experiment_metadata, 'experiment_name', ids)
-        self.columns = _get_array_columns(self._table)
         self.annotation_version = _get_experiment_attribute(self.experiment_metadata, 'annotation_version', ids)
         self.contrast = _get_experiment_attribute(self.experiment_metadata, 'contrast', ids)
         self.file = _get_experiment_attribute(self.experiment_metadata, 'file', ids)
@@ -397,36 +405,8 @@ class de_arrows:
             setattr(table, name, value)
     
     def __getitem__(self, key):
-        if isinstance(key, int):
-            return self._table[key]
-        elif isinstance(key, str):
-            if key in self.columns:
-                de = de_quackling(get_unique_conn()).fast_connect()
-                try:
-                    arrow_table=self._table
-                    arrow_table = de.conn.sql(f"SELECT {key} FROM arrow_table")
-                    arrow_table = na.Array(arrow_table)
-                    columns = [key]
-                    arrow_table = self._from_arrow(arrow_table, self.experiment_metadata, self.id, columns)
-                    return arrow_table
-                finally:
-                    de.conn.close()
-            else:
-                raise KeyError(f'{key} is not in the table')
-        elif isinstance(key, list):
-            for column in key:
-                if column not in self.columns:
-                    raise KeyError(f'{column} is not in the table')
-            de = de_quackling(get_unique_conn()).fast_connect()
-            try:
-                arrow_table = self._table
-                arrow_table = de.conn.sql(f"SELECT COLUMNS({key}) FROM arrow_table")
-                arrow_table = na.Array(arrow_table)
-                columns = key
-                arrow_table = self._from_arrow(arrow_table, self.experiment_metadata, self.id, columns)
-                return arrow_table
-            finally:
-                de.conn.close()
+        return self._table[key]
+        
 
 
 
@@ -438,79 +418,58 @@ class de_arrows:
         return repr(self._table)
     
     def __str__(self):
-        title = f'arrow.de_arrows<IDS {self.id} | {len(self._table)} Rows>'
-        return _format_arrow_table(self._table, self.columns, title=title)
+        return(str(self._table))
 
     @classmethod
-    def _from_tables(cls, *args, metadata = None, ids = None, heal_genes = False, species = None):
+    def _from_tables(cls, *args, metadata = None, ids = None, heal_genes = False, species = None, keep_ids = False):
         experiment_columns=['experiment_id', 'model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization', 'extra_info']
-        
-        de = de_quackling(get_unique_conn()).connect()
-        if heal_genes == True:
-            if species is None:
-                de.initialize_gene_table('human')
+        table = pl.DataFrame(schema = {'experiment_id': pl.Int32(), 'gene_symbol': pl.String(), 'ensembl_id': pl.String(), 'log2fc': pl.Float64(), 'logCPM': pl.Float64(), 'pvalue': pl.Float64(), 'padj': pl.Float64(), 'stat': pl.Float64(), 'other_info': pl.String()})
+        flat = []
+        final_ids = [id for id in ids]
+        final_args = [arg for arg in args]
+        if keep_ids == True:
+            args = list(args)
+            for arg in args:
+                if isinstance(arg, de_arrow) or isinstance(arg, de_arrows):
+                    table.extend(arg._table)
+                    final_ids.insert(args.index(arg), arg.id)
+                    for value in arg.experiment_metadata.values():
+                        metadata.insert(args.index(arg), value)
+                    args.remove(arg)
+                    
+        for arg, id in zip(args, ids):
+            if isinstance(arg, de_arrow):
+                arg = arg.replace_column(0, pl.lit(id).alias('experiment_id'))
+                metadata.insert(args.index(arg), arg.experiment_metadata[arg.id])
+            elif isinstance(arg, de_arrows):
+                if not isinstance(id, list) and not isinstance(id, tuple) or len(id) != len(arg.id):
+                    raise DeQuackError('ids must be a list or tuple for de_arrows objects and must be of same id length')
+                id_lookup = pl.DataFrame({'old_id': arg.id, 'new_id': id}, schema = {'old_id': pl.Int32(), 'new_id': pl.Int32()})
+                arg = arg.join(id_lookup, left_on = 'experiment_id', right_on = 'old_id', how = 'left')
+                arg = arg.with_columns(pl.col('new_id').alias('experiment_id')).select(pl.all().exclude(['old_id', 'new_id']))
+                for old_id in arg.id:
+                    metadata.insert(args.index(arg), arg.experiment_metadata[old_id])
             else:
-                de.initialize_gene_table(species)
-        args = list(args)
-        if metadata is None:
-            metadata = []
-        if ids is None:
-            ids = []
-        try:
-            for data in args:
-                if isinstance(data, de_arrow):
-                    metadata_fields = {key : value for key, value in data.experiment_metadata[data.id].items() if key in experiment_columns}
-                    other_info = {key:value for key, value in data.experiment_metadata[data.id].items() if key not in experiment_columns}
-                    ids.insert(0, data.id)
-                    result = de.conn.execute('INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id',
-                    (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, None)).fetchall()
-                    experiment_id = result[0][0]
-                    de.conn.execute('INSERT INTO gene_results (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info) SELECT * REPLACE(? AS experiment_id) FROM data WHERE experiment_id = ?', (experiment_id, data.id,))
-                elif isinstance(data, de_arrows):
-                    for id in data.id:
-                        metadata_fields = {key : value for key, value in data.experiment_metadata[id].items() if key in experiment_columns}
-                        other_info = {key:value for key, value in data.experiment_metadata[id].items() if key not in experiment_columns}
-                        ids.insert(0, id)
-                        result = de.conn.execute('INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id',
-                        (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, None)).fetchall()
-                        experiment_id = result[0][0]
-                        de.conn.execute('INSERT INTO gene_results (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info) SELECT * REPLACE(? AS experiment_id) FROM data WHERE experiment_id = ?', (experiment_id, id,))
+                arg = _to_polars_table(arg)
+                arg = _order_columns(arg)
+                arg = arg.insert_column(0, pl.lit(id).alias('experiment_id'))
+            table.extend(arg)
+        
+        for id in final_ids:
+            if isinstance(id, list) or isinstance(id, tuple):
+                flat.extend(id)
+            else:
+                flat.append(id)
+        _check_ids(flat)
+        metadata_fields = _to_metadata(metadata, flat, final_args)
+        return table, metadata_fields, flat
+            
+        
+
+        
                 
-            args = [data for data in args if not isinstance(data, de_arrow) and not isinstance(data, de_arrows)]
-
-                   
-            for data, meta in zip(args, metadata):
-                de.ingest(data, meta, species)
-    
-            ids=de.conn.sql(f'SELECT UNNEST({ids}) AS ids')
-            rel = de.conn.sql(_de_arrows_queries['insertion_from_table'])
             
             
-            meta_rel = rel.select(', '.join(experiment_columns)).distinct()
-            rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info')
-            metadata_list = [dict(zip(experiment_columns, row)) for row in meta_rel.fetchall()]
-            
-            # Parse extra_info JSON and flatten into metadata
-            for meta in metadata_list:
-                if meta.get('extra_info'):
-                    try:
-                        extra = json.loads(meta['extra_info'])
-                        for key, value in extra.items():
-                            meta[key] = value
-                    except json.JSONDecodeError:
-                        pass
-                meta.pop('extra_info', None)
-
-            ids = [meta.pop('experiment_id') for meta in metadata_list]
-            metadata_fields = {exp_id: meta for meta, exp_id in zip(metadata_list, ids)}
-            schema = na.Schema(na.Type.INT64)
-            table = na.Array(rel, schema)
-            _check_ids(ids)
-            return table, metadata_fields, ids
-            
-        finally:
-            de.conn.close()
-    
     @classmethod
     def _from_arrow(cls, table, metadata, ids, columns = None):
         instance = object.__new__(cls)
@@ -864,10 +823,6 @@ def _get_experiment_attribute(metadata, field, ids):
     else:
         return {ids: metadata.get(ids, {}).get(field)}
 
-def _get_array_columns(table):
-    schema = table.schema
-    return [field.name for field in schema.fields]
-
 def _check_columns(required_columns, columns):
         missing_columns = required_columns - set(columns)
         if missing_columns:
@@ -879,95 +834,91 @@ def _check_ids(ids):
             raise DeQuackError(f'id {id} occurs multiple times in object ids')
         if isinstance(id, str):
             raise TypeError('String found in id list')
+
+def _to_metadata(metadata, id, tables):
+    meta_list = []
+    to_remove_tables = []
+    to_remove_metadata = []
+    print(metadata)
+    for table in tables:
+        if isinstance(table, de_arrows):
+            to_remove_tables.append(table)
+            print(table.experiment_metadata)
+            for n in table.id:
+                print(metadata.index(table.experiment_metadata[n]) + table.id.index(n))
+                m = metadata[metadata.index(table.experiment_metadata[n]) + table.id.index(n)]
+                meta_list.append(m)
+                to_remove_metadata.append(m)
+    for table in to_remove_tables:
+        tables.remove(table)
+    for meta in to_remove_metadata:
+        metadata.remove(meta)
+    for meta, table in zip(metadata, tables):
+        print(meta, table)
+        if isinstance(table, de_arrow):
+            meta_list.append(meta)
+        else:
+            m, extra_info = ExperimentMetadata().to_dict(meta, table)
+            extra_info = json.loads(extra_info)
+            for key, value in extra_info.items():
+                m[key] = value
+            meta_list.append(m)
+    
+    metadata_dict = {}
+    for meta, id in zip(meta_list, id):
+        metadata_dict[id] = meta
+    return metadata_dict
+
             
 
-def _safe_str(value):
-    if value is None:
-        return 'NaN'
-    if isinstance(value, (bytes, bytearray)):
-        return value.decode('utf-8', 'replace')
-    return str(value)
+def _to_polars_table(table):
+    if isinstance(table, str):
+        path = os.path.abspath(table)
+        if os.path.exists(path):
+            if path.endswith('.parquet'):
+                return pl.read_parquet(path)
+            else:
+                with open(path, 'r') as f:
+                    first_line = f.readline()
+                    separator = "\t" if "\t" in first_line else (";" if ";" in first_line else ",")
+                return pl.read_csv(path, separator=separator)
+    class_name = table.__class__.__name__
+    if class_name == 'Table':
+        return pl.from_arrow(table)
+    if class_name == 'DataFrame':
+        return pl.from_pandas(table)
+    raise ValueError(f"Unsupported table type: {class_name}. Supported types are: str (file path), pyarrow.Table, pandas.DataFrame.")
 
+def _order_columns(df):
+    columns = df.columns
+    extra_columns = [col for col in columns if col not in _GENE_ALIAS_TO_COLUMN.values()]
+    real_columns = [_GENE_ALIAS_TO_COLUMN.get(col.lower()) for col in columns if _GENE_ALIAS_TO_COLUMN.get(col.lower())]
+    essential_cols = {'padj', 'log2fc', 'padj'}
+    if essential_cols - set(real_columns):
+        raise DeQuackError(f'Missing essential columns: {essential_cols - set(real_columns)}')
+    df = df.rename({col: _GENE_ALIAS_TO_COLUMN.get(col.lower()) for col in columns if _GENE_ALIAS_TO_COLUMN.get(col.lower())})
+    if 'gene_name' in df.columns:
+        sample = df.select('gene_name').to_series().head(1).to_list()
+        if re.match('^ENS', sample[0]):
+            if 'ensembl_id' not in df.columns:
+                df = df.rename({'gene_name': 'ensembl_id'})                 
+        else:
+            if 'gene_symbol' not in df.columns:
+                df = df.rename({'gene_name': 'gene_symbol'})
+    expressions = []
+    for col in _gene_columns:
+        if col in df.columns:
+            expressions.append(pl.col(col))
+        else:
+            expressions.append(pl.lit(None).alias(col))
+    extra_columns = set([col for col in df.columns if col not in _gene_columns and col != 'experiment_id'])
+    if not extra_columns:
+        expressions.append(pl.lit(None).alias('other_info'))
+    else:
+        expressions.append(pl.struct(extra_columns).struct.json_encode().alias('other_info'))
+    df = df.select(expressions)
 
-def _get_display_width(default=100):
-    try:
-        width = shutil.get_terminal_size(fallback=(default, 20)).columns
-    except OSError:
-        width = default
-    if not sys.stdout.isatty():
-        return default
-    return max(40, width)
-
-
-def _truncate_text(text, width):
-    if len(text) <= width:
-        return text
-    if width <= 3:
-        return '.' * width
-    return text[: width - 3] + '...'
-
-
-def _render_ascii_table(headers, rows, title=None, max_width=None):
-    if max_width is None:
-        max_width = _get_display_width()
-
-    num_cols = len(headers)
-    if num_cols == 0:
-        return title or ''
-
-    column_widths = [len(header) for header in headers]
-    for row in rows:
-        for idx, cell in enumerate(row):
-            column_widths[idx] = max(column_widths[idx], len(cell))
-
-    max_col_width = 30
-    column_widths = [min(width, max_col_width) for width in column_widths]
-
-    separator = '   '
-    total_width = sum(column_widths) + len(separator) * (num_cols - 1)
-    if title:
-        total_width = max(total_width, len(title))
-
-    if total_width > max_width:
-        excess = total_width - max_width
-        adjustable = [i for i, w in enumerate(column_widths) if w > 8]
-        while excess > 0 and adjustable:
-            largest_idx = max(adjustable, key=lambda i: column_widths[i])
-            column_widths[largest_idx] -= 1
-            excess -= 1
-            if column_widths[largest_idx] <= 8:
-                adjustable.remove(largest_idx)
-
-    header_line = separator.join(headers[idx].ljust(column_widths[idx]) for idx in range(num_cols))
-    output_lines = []
-    if title:
-        output_lines.append(title)
-    output_lines.append(header_line)
-    for row in rows:
-        output_lines.append(separator.join(_truncate_text(row[idx], column_widths[idx]).ljust(column_widths[idx]) for idx in range(num_cols)))
-    return '\n'.join(output_lines)
-
-
-def _format_arrow_table(table, columns, title=None, max_width=None, max_rows=10):
-    num_rows = len(table)
-    if num_rows == 0:
-        if title:
-            return f'{title}\n[empty]'
-        return '[empty]'
-
-    data = {col: table.child(columns.index(col)).to_pylist() for col in columns}
-    rows = [[_safe_str(data[col][idx]) for col in columns] for idx in range(num_rows)]
-
-    if num_rows > max_rows:
-        head_rows = max_rows // 2
-        tail_rows = max_rows - head_rows
-        rows = rows[:head_rows] + [['...' for _ in columns]] + rows[-tail_rows:]
-
-    return _render_ascii_table(columns, rows, title=title, max_width=max_width)
-
-
-
-
+    return df
 
 
 

@@ -11,7 +11,7 @@ from .utilities import DE_ARROW_QUERIES
 
 _de_queries = DE_ARROW_QUERIES
 
-def volcano_plot(data, padj = 0.05, log2fc = 1, title=None, label_genes = 0, label_color = 'black', upregulated_color = 'red', downregulated_color = 'blue', insignificant_color = 'grey', label_size = 10, label_font = 'Arial', label_rotation = 0, label_fontweight = 'normal', file = None, label_name = 'gene_symbol'):
+def volcano_plot(data, padj = 0.05, log2fc = 1, title=None, label_genes = 0, label_color = 'black', upregulated_color = 'red', downregulated_color = 'blue', insignificant_color = 'grey', label_size = 10, label_font = 'Arial', label_rotation = 0, label_fontweight = 'bold', file = None, label_name='ensembl_id', show=False):
     de = de_quackling(get_unique_conn()).connect()
     if not isinstance(data, de_arrow) or not isinstance(data, de_arrows):
         de._preprocess(data)
@@ -40,7 +40,7 @@ def volcano_plot(data, padj = 0.05, log2fc = 1, title=None, label_genes = 0, lab
     plt.axvline(log2fc, color='black', linestyle='--', linewidth=1)
 
     plt.xlabel('Log2FC')
-    plt.ylabel('Log10(Padj)')
+    plt.ylabel('-Log10(Padj)')
     plt.title(title)
     plt.legend()
 
@@ -50,13 +50,19 @@ def volcano_plot(data, padj = 0.05, log2fc = 1, title=None, label_genes = 0, lab
         top_regulated = upregulated.select(label_name, 'log2fc', 'padj').order('log2fc DESC').limit(label_genes).fetchall()
         top_regulated += downregulated.select(label_name, 'log2fc', 'padj').order('log2fc ASC').limit(label_genes).fetchall()
         for gene, log2fc, padj in top_regulated:
-            plt.text(log2fc, -np.log10(padj), gene, fontsize=label_size, color=label_color, rotation=label_rotation, fontweight=label_fontweight, fontname=label_font)
+            plt.text(log2fc + 0.1, -np.log10(padj) + 0.1, gene, fontsize=label_size, color=label_color, rotation=label_rotation, fontweight=label_fontweight, fontname=label_font)
+            print(log2fc, -np.log10(padj), gene)
        
 
     if file:
         if not os.path.exists(os.path.abspath(file)):
             open(os.path.abspath(os.path.abspath(file)), 'a').close()
         plt.savefig(file, bbox_inches='tight', dpi=300)
+    if show == True:
+        plt.show()
+    else:
+        return plt
+        
     
 
         

@@ -40,7 +40,7 @@ excel = ["openpyxl>=3.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["de_quack*"]
+include = ["de_quack*", "src/de_quack/gene_tables/*.parquet"]
 
 [tool.setuptools.package-data]
 "*" = ["*.py"]
