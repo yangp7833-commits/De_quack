@@ -13,14 +13,9 @@ _de_queries = DE_ARROW_QUERIES
 
 def volcano_plot(data, padj = 0.05, log2fc = 1, title=None, label_genes = 0, label_color = 'black', upregulated_color = 'red', downregulated_color = 'blue', insignificant_color = 'grey', label_size = 10, label_font = 'Arial', label_rotation = 0, label_fontweight = 'bold', file = None, label_name='ensembl_id', show=False):
     de = de_quackling(get_unique_conn()).connect()
-    if not isinstance(data, de_arrow) or not isinstance(data, de_arrows):
-        de._preprocess(data)
-        de_arrow_insertion_view = de._create_temp_view()
-        arrow_table = de.conn.sql(_de_queries['insert_to_de_arrow'], params = {'id': 0})
-    else:
-        if data.columns - set(['gene', 'log2fc', 'padj', 'logCPM']) != set():
-            raise ProcessingError("The input data must contain the following columns: 'gene', 'log2fc', and 'padj'")
-        arrow_table = data
+    de._preprocess(data)
+    de_arrow_insertion_view = de._create_temp_view()
+    arrow_table = de.conn.sql(_de_queries['insert_to_de_arrow'], params = {'id': 0})
 
     
     upregulated = de.conn.sql('SELECT * FROM arrow_table WHERE log2fc > $log2fc AND padj < $padj AND padj != 0', params = {'padj': padj, 'log2fc': log2fc})

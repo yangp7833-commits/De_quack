@@ -31,6 +31,7 @@ dependencies = [
   "duckdb>=1.0",
   "pandas>=1.0",
   "numpy>=1.20",
+  "polars>=1.0",
   "matplotlib>=3.0",
   "adjustText>=0.7"
 ]

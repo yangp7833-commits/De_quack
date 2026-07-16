@@ -14,6 +14,6 @@ __all__ = [
     "ProcessingError",
     "DuplicateExperimentError",
     "DuplicateGeneTableError",
-    "de_arrow"
-    "de_arrows"
+    "de_arrow",
+    "de_arrows",
 ]

@@ -16,21 +16,18 @@ def make_data(total):
             length = 11 - len(str(i))
             n = '0' * length + str(i)
             f.write(f'ENSG{n},2.5,0.01,5.0\n')
-
-#df = pd.read_csv('new_data_csv')
-#df = df[df['log2fc'] > 1]
-#print(df)
-p = pa.Table.from_pydict({'g': [2, 3, 4]})
-
-
 start_time = time.perf_counter()
-arrow = de_arrows('new_data_csv', 'new_data_csv', ids =[1, 2], metadata = [{}] * 2)
-print(arrow.experiment_metadata)
-arrow = de_arrows._from_tables('new_data_csv', arrow, ids =[3], metadata = [{}], keep_ids = True)
+arrow = de_arrow('data1.txt', experiment_name='new_data_csv').get_gene(ensembl_id = 'ENSG00000000001').set_id(3)
+arrows = de_arrows('new_data_csv', arrow, metadata = {})
+arrow = de_arrows(arrow, arrows, keep_ids = True)
+print(arrow.id)
 end_time = time.perf_counter()
 elapsed_time = end_time - start_time
-print(f"Creating de_arrow took {elapsed_time:.2f} seconds.")
-print(arrow)
+print(f"Time taken to create arrow: {elapsed_time:.4f} seconds")
+print(arrows)
+
+
+
 
 
 

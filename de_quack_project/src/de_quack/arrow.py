@@ -1,19 +1,20 @@
-import nanoarrow as na
-from .core import de_quackling
-from .utilities import ExperimentMetadata, DE_ARROW_QUERIES, DE_ARROWS_QUERIES, gene_columns, gene_mapping
-import duckdb
-from .exceptions import DeQuackError, ProcessingError, DuplicateExperimentError, DuplicateGeneTableError
 import json
-import uuid
-import re
 import os
-import sys
-from importlib import resources
-import hashlib
+import re
 import time
+import uuid
+from importlib import resources
+
+import duckdb
 import polars as pl
-_de_arrow_queries=DE_ARROW_QUERIES
-_de_arrows_queries=DE_ARROWS_QUERIES
+
+from .core import de_quackling
+from .exceptions import DeQuackError, ProcessingError
+from .utilities import DE_ARROW_QUERIES, DE_ARROWS_QUERIES, ExperimentMetadata, gene_columns, gene_mapping
+
+
+_de_arrow_queries = DE_ARROW_QUERIES
+_de_arrows_queries = DE_ARROWS_QUERIES
 _gene_mapping_queries = gene_mapping
 _GENE_ALIAS_TO_COLUMN = {
     alias.lower(): canonical
@@ -21,8 +22,174 @@ _GENE_ALIAS_TO_COLUMN = {
     for alias in aliases + [canonical]
 }
 _gene_columns = ['gene_symbol', 'ensembl_id', 'log2fc', 'logCPM', 'pvalue', 'padj', 'stat']
+
+
+def get_unique_conn():
+    unique_id = uuid.uuid4().hex[:8]
+    return f':memory:de_quack_{unique_id}'
+
+
+def _to_polars_table(table):
+    if isinstance(table, pl.DataFrame):
+        return table.clone()
+    if isinstance(table, pl.LazyFrame):
+        return table.collect()
+    if hasattr(table, 'to_frame') and callable(table.to_frame):
+        return _to_polars_table(table.to_frame())
+
+    try:
+        import pandas as pd
+    except ImportError:
+        pd = None
+
+    if pd is not None and isinstance(table, pd.DataFrame):
+        return pl.from_pandas(table)
+
+    if isinstance(table, str):
+        path = os.path.abspath(table)
+        if not os.path.exists(path):
+            raise FileNotFoundError(f'File not found: {path}')
+        if path.lower().endswith('.parquet'):
+            return pl.read_parquet(path)
+        with open(path, 'r', encoding='utf-8') as handle:
+            first_line = handle.readline()
+        separator = '\t' if '\t' in first_line else (';' if ';' in first_line else ',')
+        return pl.read_csv(path, separator=separator)
+
+    if isinstance(table, dict):
+        return pl.DataFrame(table)
+
+    if isinstance(table, list):
+        return pl.DataFrame(table)
+
+    return pl.DataFrame(table)
+
+
+def _check_columns(required_columns, columns):
+    missing_columns = required_columns - set(columns)
+    if missing_columns:
+        raise DeQuackError(f'De_arrow object is missing {missing_columns} for this function')
+
+
+def _check_ids(ids):
+    for item in ids:
+        if ids.count(item) > 1:
+            raise DeQuackError(f'id {item} occurs multiple times in object ids')
+        if isinstance(item, str):
+            raise TypeError('String found in id list')
+
+
+def _get_experiment_attribute(metadata, field, ids):
+    if isinstance(ids, list):
+        return {item: metadata.get(item, {}).get(field) for item in ids}
+    return {ids: metadata.get(ids, {}).get(field)}
+
+
+def _get_gene_table(species):
+    folder = resources.files('de_quack') / 'gene_tables'
+    return folder / f'{species}_genes.parquet'
+
+
+def _heal_genes(df, species):
+    df = _to_polars_table(df).lazy()
+    genes = pl.scan_parquet(_get_gene_table(species)).select('symbol', 'ensembl_id')
+
+    df = df.with_columns(pl.col('gene_symbol').fill_null(pl.lit('')).alias('gene_symbol'))
+    df = df.join(genes, on='ensembl_id', how='left')
+    df = df.with_columns(pl.col('ensembl_id').fill_null(pl.lit('')).alias('ensembl_id'))
+    df = df.join(genes, left_on='gene_symbol', right_on='symbol', how='left', suffix='_on_symbol')
+
+    return df.select(
+        pl.coalesce(['symbol', 'gene_symbol']).alias('gene_symbol'),
+        pl.coalesce(['ensembl_id', 'ensembl_id_on_symbol']).alias('ensembl_id'),
+        pl.all().exclude(['symbol', 'ensembl_id_on_symbol', 'gene_symbol', 'ensembl_id'])
+    ).collect()
+
+
+def _order_columns(df):
+    df = _to_polars_table(df)
+    rename_map = {
+        column: _GENE_ALIAS_TO_COLUMN[column.lower()]
+        for column in df.columns
+        if column.lower() in _GENE_ALIAS_TO_COLUMN and column != 'experiment_id'
+    }
+    if rename_map:
+        df = df.rename(rename_map)
+
+    if 'gene_name' in df.columns:
+        sample = df.select('gene_name').to_series().head(1).to_list()
+        if sample and sample[0] is not None and re.match(r'^ENS', str(sample[0])):
+            if 'ensembl_id' not in df.columns:
+                df = df.rename({'gene_name': 'ensembl_id'})
+        elif 'gene_symbol' not in df.columns:
+            df = df.rename({'gene_name': 'gene_symbol'})
+
+    expressions = []
+    if 'experiment_id' in df.columns:
+        expressions.append(pl.col('experiment_id'))
+
+    for column in _gene_columns:
+        if column in df.columns:
+            expressions.append(pl.col(column))
+        else:
+            expressions.append(pl.lit(None).alias(column))
+
+    extra_columns = [column for column in df.columns if column not in _gene_columns and column != 'experiment_id']
+    if extra_columns:
+        if len(extra_columns) == 1 and extra_columns[0] == 'other_info':
+            expressions.append(pl.col('other_info'))
+        else:
+            struct_columns = [column for column in extra_columns if column != 'other_info']
+            if 'other_info' in df.columns:
+                struct_columns.append('other_info')
+            expressions.append(pl.struct(struct_columns).struct.json_encode().alias('other_info'))
+    elif 'other_info' in df.columns:
+        expressions.append(pl.col('other_info'))
+    else:
+        expressions.append(pl.lit(None).alias('other_info'))
+
+    return df.select(expressions)
+
+
+def _to_metadata(metadata, ids, tables):
+    metadata = list(metadata)
+    meta_list = []
+    to_remove_tables = []
+    to_remove_metadata = []
+
+    for table in tables:
+        if isinstance(table, de_arrows):
+            to_remove_tables.append(table)
+            for item in table.id:
+                index = metadata.index(table.experiment_metadata[item]) + table.id.index(item)
+                meta_list.append(metadata[index])
+                to_remove_metadata.append(metadata[index])
+
+    for table in to_remove_tables:
+        tables.remove(table)
+    for item in to_remove_metadata:
+        metadata.remove(item)
+
+    for meta, table in zip(metadata, tables):
+        if isinstance(table, de_arrow):
+            meta_list.append(meta)
+        else:
+            m, extra_info = ExperimentMetadata().to_dict(meta, table)
+            extra_info = json.loads(extra_info)
+            for key, value in extra_info.items():
+                m[key] = value
+            meta_list.append(m)
+
+    metadata_dict = {}
+    for meta, item in zip(meta_list, ids):
+        metadata_dict[item] = meta
+    return metadata_dict
+
+
+
+
 class de_arrow:
-    
+
     def __init__(self, info, id = None, metadata=None,  heal_genes = False, species = None, **fields):
         
         if metadata is None:
@@ -41,35 +208,6 @@ class de_arrow:
         self.date = _get_experiment_attribute(self.experiment_metadata, 'date', id)
         self.model = _get_experiment_attribute(self.experiment_metadata, 'model', id)
         self.id = id
-
-        
-    
-    def __getattr__(self, name):
-        # Delegate attribute access to the internal nanoarrow table without triggering recursion
-        table = object.__getattribute__(self, '_table')
-        return getattr(table, name)
-    
-    def __setattr__(self, name, value):
-        if name in ('_table', 'experiment_metadata', 'name', 'annotation_version', 'contrast', 'file', 'date', 'id', 'model'):
-            object.__setattr__(self, name, value)
-        else:
-            table = object.__getattribute__(self, '_table')
-            setattr(table, name, value)
-    
-    def __getitem__(self, key):
-        return self._table[key]
-       
-
-    def __len__(self):
-        return len(self._table)
-    
-    def __repr__(self):
-        return repr(self._table)
-    
-    def __str__(self):
-        return(str(self._table))
-    
-
     
     @classmethod
     def _to_de_arrow(self, info, metadata, experiment_id=None, heal_genes=False, species = None):
@@ -94,14 +232,14 @@ class de_arrow:
    
 
     @classmethod
-    def _from_arrow(cls, arrow_array, metadata, id, columns = None):
+    def _from_arrow(cls, df, metadata, id, columns = None):
         """
         Convert a nanoarrow array back into a de_arrow object.
         
         Parameters
         ----------
-        arrow_array : nanoarrow.Array
-            A nanoarrow array to convert
+        df : polars.DataFrame
+            A polars DataFrame to convert
         metadata : dict
             A nested dictionary containing metadata {ID: {field: value}}
         
@@ -111,7 +249,7 @@ class de_arrow:
             A de_arrow object with the provided array and metadata
         """
         instance = cls.__new__(cls)
-        instance._table = arrow_array
+        instance._table = df
         instance.experiment_metadata = metadata
         instance.name = _get_experiment_attribute(metadata, 'experiment_name', id)
         instance.annotation_version = _get_experiment_attribute(metadata, 'annotation_version', id)
@@ -121,221 +259,155 @@ class de_arrow:
         instance.model = _get_experiment_attribute(metadata, 'model', id)
         instance.id = id
         return instance
+
+        
     
+    def __setattr__(self, name, value):
+        if name in ('_table', 'experiment_metadata', 'name', 'annotation_version', 'contrast', 'file', 'date', 'id', 'model'):
+            object.__setattr__(self, name, value)
+        else:
+            table = object.__getattribute__(self, '_table')
+            setattr(table, name, value)
+    
+    def __getitem__(self, key):
+        return self._table[key]
+       
+
+    def __len__(self):
+        return len(self._table)
+    
+    def __repr__(self):
+        return repr(self._table)
+    
+    def __str__(self):
+        return(str(self._table))
+
+    
+
+    def __getattr__(self, name):
+        table = object.__getattribute__(self, '_table')
+        attr = getattr(table, name)
+        if not callable(attr):
+            return attr
+
+        def wrapper(*args, **kwargs):
+            result = attr(*args, **kwargs)
+            if isinstance(result, pl.DataFrame):
+                if result.columns == table.columns:
+                    return self.__class__._from_arrow(result, self.experiment_metadata, self.id)
+            
+            return result
+
+        return wrapper
+
+    
+    
+
     
     def get_significant_genes(self, log2fc=1, pvalue=0.05, logCPM=0):
         required_columns = {'log2fc', 'pvalue', 'logCPM'}
         _check_columns(required_columns, self.columns)
-        de=de_quackling(get_unique_conn()).fast_connect()
-        try:
-            arrow_table=self._table
-            rel=de.conn.sql(_de_arrow_queries['get_important_genes'], params={'log2fc':log2fc, 'pvalue':pvalue, 'logCPM': logCPM})
-            arrow_table=na.Array(rel)
-            arrow_table=self._from_arrow(arrow_table, self.experiment_metadata, self.id)
-            return arrow_table
-        finally:
-            de.conn.close()
-    
+        print(self._table)
+        df = self._table.filter(
+            (pl.col('log2fc').abs() >= log2fc) &
+            (pl.col('pvalue') <= pvalue) &
+            (pl.col('logCPM') >= logCPM)
+        )
+        return self._from_arrow(df, self.experiment_metadata, self.id)
+
     def get_downregulated(self, log2fc=0, pvalue=0.05, logCPM=0):
         required_columns = {'log2fc', 'pvalue', 'logCPM'}
         _check_columns(required_columns, self.columns)
-        de=de_quackling(get_unique_conn()).fast_connect()
-        try:
-            arrow_table=self._table
-            rel=de.conn.sql(_de_arrow_queries['get_downregulated'], params={'log2fc':log2fc, 'pvalue':pvalue, 'logCPM': logCPM})
-            arrow_table=self._from_arrow(arrow_table, self.experiment_metadata, self.id)
-            return arrow_table
-        finally:
-            de.conn.close()
-    
+        frame = self._table.filter(
+            (pl.col('log2fc') <= log2fc) &
+            (pl.col('pvalue') <= pvalue) &
+            (pl.col('logCPM') >= logCPM)
+        )
+        return self._from_arrow(df, self.experiment_metadata, self.id)
+
     def get_upregulated(self, log2fc=0, pvalue=0.05, logCPM=0):
         required_columns = {'log2fc', 'pvalue', 'logCPM'}
         _check_columns(required_columns, self.columns)
-        de=de_quackling(get_unique_conn()).fast_connect()
-        try:
-            arrow_table=self._table
-            rel=de.conn.sql(_de_arrow_queries['get_upregulated'], params={'log2fc':log2fc, 'pvalue':pvalue, 'logCPM': logCPM})
-            arrow_table=na.Array(rel)
-            arrow_table=self._from_arrow(arrow_table, self.experiment_metadata, self.id)
-            return arrow_table
-        finally:
-            de.conn.close()
-    
+        frame = self._table.filter(
+            (pl.col('log2fc') >= log2fc) &
+            (pl.col('pvalue') <= pvalue) &
+            (pl.col('logCPM') >= logCPM)
+        )
+        return self._from_arrow(frame, self.experiment_metadata, self.id)
+
     def set_id(self, id):
-        de=de_quackling(get_unique_conn()).fast_connect()
-        try:
-            arrow_table=self._table
-            rel=de.conn.sql(_de_arrow_queries['set_arrow_id'], params={'id':id})
-            arrow_table=na.Array(rel)
-            old_id = self.id
-            updated_metadata = {id: self.experiment_metadata.get(old_id, {})}
-            arrow_table=self._from_arrow(arrow_table, updated_metadata, id)
-            return arrow_table
-        finally:
-            de.conn.close()
-    
-    def add_experiment(self, data, metadata = None, id = None):
-        if isinstance(data, de_arrow):
-            return self._add_experiment_arrow(data, metadata, id)
-        if isinstance(data, de_arrows):
-            if metadata is not None:
-                if not isinstance(metadata, list) or not isinstance(metadata[0], dict):
-                    raise DeQuackError('Metadata must be a list of dictionaries for de_arrows objects!')
-                if len(id) != len(data.id):
-                    raise DeQuackError('Length of id list does not match length of incoming de_arrows object')
-            return self._add_experiment_arrows(data, metadata, id)
-        return self._add_experiment_data(data, metadata, id)
+        if isinstance(id, int):
+            frame = self._table.with_columns(pl.lit(id).alias('experiment_id'))
+            return self._from_arrow(frame, self.experiment_metadata, id)
+        raise DeQuackError(f'set_ids expected an integer, not {type(id)}')
 
-    
-    def _add_experiment_arrows(self, data, metadata = None, ids = None):
-        de = de_quackling(get_unique_conn()).fast_connect()
-        try:
-            arrow_table = self._table
-            data = data.set_id(ids)
-            if ids is None:
-                ids = data.id
-            ids.append(self.id)
-            _check_ids(ids)
-            self_metadata = self.experiment_metadata
-            if metadata is None:
-                new_metadata = data.experiment_metadata
-                for id, value in zip(ids, new_metadata.values()):
-                    self_metadata[id] = value
-            else:
-                new_metadata = metadata
-                for meta, id in zip(ids, new_metadata):
-                    m, extra_info = ExperimentMetadata.to_dict(new_metadata)
-                    for key, value in extra_info.items():
-                        m[key] = value
-                    self_metadata[n] = m
-            
-            arrow_table = de.conn.sql("SELECT * FROM arrow_table UNION ALL SELECT * FROM data")
-            arrow_table = na.Array(arrow_table)
-            ids = [id for id in self_metadata.keys()]
-            return de_arrows._from_arrow(arrow_table, self_metadata, ids)
-        finally:
-            de.conn.close()
-        
-        
-    def _add_experiment_arrow(self, data, metadata = None, id = None):
-        arrow_table = self._table
-        if not isinstance(id, int) and id is not None:
-            raise DeQuackError('id has to be an integer')
-        de = de_quackling(get_unique_conn()).fast_connect()
-        try:
-            new_metadata = ExperimentMetadata.to_dict(metadata) if metadata is not None else data.experiment_metadata
-            id = id if id is not None else data.id
-            if id == self.id:
-                raise DeQuackError('Duplicate ids found')
-            metadata = self.experiment_metadata
-            arrow_table = de.conn.sql("SELECT * FROM arrow_table UNION ALL SELECT * REPLACE ($id AS experiment_id) FROM data", params = {'id':id})
-            arrow_table = na.Array(arrow_table)
-            metadata[id] = list(new_metadata.values())[0]
-            ids = [self.id, id]
-            return de_arrows._from_arrow(arrow_table, metadata, ids)
-        finally:
-            de.conn.close()
 
-    def _add_experiment_data(self, data, metadata = None, id = None):
-        arrow_table = self._table
-        if metadata is None:
-            raise DeQuackError('No metadata provided for the data')
-        if id is None:
-            raise DeQuackError('No id provided')
-        de = de_quackling(get_unique_conn()).connect()
-        try:
-            new_metadata, extra_info=ExperimentMetadata().to_dict(metadata, data)
-            for key, value in json.loads(extra_info).items():
-                new_metadata[key]=value
-            new_metadata={id: new_metadata}
-            de._preprocess(data)
-            de_arrow_insertion_view = de._create_temp_view()
-            data = de.conn.sql(_de_arrow_queries['insert_to_de_arrow'], params={'id':id})
-            if id == self.id:
-                raise DeQuackError('Duplicate ids found')
-            metadata = self.experiment_metadata
-            arrow_table = de.conn.sql("SELECT * FROM arrow_table UNION ALL SELECT * FROM data")
-            arrow_table = na.Array(arrow_table)
-            metadata[id] = new_metadata[id]
-            ids = [self.id, id]
-            return de_arrows._from_arrow(arrow_table, metadata, ids)
-        finally:
-            de.conn.close()
-    
-    def get_gene(self, gene_symbol = None, ensembl_id = None):
+    def get_gene(self, gene_symbol=None, ensembl_id=None, id=None):
         required_columns = {'gene_symbol', 'ensembl_id'}
         _check_columns(required_columns, self.columns)
-        de = de_quackling(get_unique_conn()).fast_connect()
-        arrow_table = self._table
-        rel = de.conn.sql(_de_arrow_queries['get_gene'], 
-        params = {
-        'gene_symbol': gene_symbol,
-        'ensembl_id': ensembl_id,
-        })
-        arrow_table = na.Array(rel)
-        de.conn.close()
-        return self._from_arrow(arrow_table, self.experiment_metadata, self.id)
+        expression = pl.lit(True)
+        if id is not None and 'experiment_id' in self.columns:
+            expression = expression & (pl.col('experiment_id') == id)
+        if gene_symbol is not None:
+            expression = expression & (pl.col('gene_symbol') == gene_symbol)
+        if ensembl_id is not None:
+            expression = expression & (pl.col('ensembl_id') == ensembl_id)
+        df = self._table.filter(expression)
+        return self._from_arrow(df, self.experiment_metadata, self.id)
+        
+
+    def add_experiment(self, data, metadata=None, id=None):
+        frame = _to_polars_table(data)
+        incoming_ids = _ids_from_frame(frame)
+
+        if id is not None:
+            if isinstance(id, list):
+                if incoming_ids and len(id) == len(incoming_ids):
+                    mapping = dict(zip(incoming_ids, id))
+                    frame = frame.with_columns(pl.col('experiment_id').replace(mapping).alias('experiment_id')) if 'experiment_id' in frame.columns else frame.with_columns(pl.lit(id[0]).alias('experiment_id'))
+                elif len(id) == 1:
+                    frame = frame.with_columns(pl.lit(id[0]).alias('experiment_id'))
+                else:
+                    raise DeQuackError('Length of id list does not match incoming data')
+            else:
+                frame = frame.with_columns(pl.lit(id).alias('experiment_id'))
+
+        combined = pl.concat([self._frame, frame], how='vertical_relaxed')
+        metadata = metadata or self.experiment_metadata
+        ids = _ids_from_frame(combined)
+        return _wrap_frame(combined, metadata=metadata, ids=ids)
 
     def insert(self, file):
         required_columns = {'padj', 'pvalue', 'log2fc', 'gene_symbol', 'ensembl_id', 'logCPM', 'stat', 'other_info', 'experiment_id'}
         _check_columns(required_columns, self.columns)
         if not isinstance(file, str):
             raise TypeError(f'file must be a string, not {type(file)}')
-        arrow_table = self._table
-        metadata = self.experiment_metadata   
-        m, other_info = ExperimentMetadata().to_dict(metadata[self.id], None)
+
         de = de_quackling(file).connect()
         try:
-            sample_data = de.conn.execute('SELECT * FROM (SELECT * FROM arrow_table LIMIT 100)').fetchall()
-            data_sig = hashlib.md5(str(sample_data).encode()).hexdigest()
-            id = de._create_experiment(m, data_sig, other_info)
-            de.conn.sql('INSERT INTO gene_results (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info) SELECT * REPLACE($id AS experiment_id) FROM arrow_table', params = {'id': id})
+            for exp_id in _ids_from_frame(self._frame):
+                subset = self._frame.filter(pl.col('experiment_id') == exp_id)
+                meta = self.experiment_metadata.get(exp_id, {}) if isinstance(self.experiment_metadata, dict) else {}
+                metadata_fields, extra_info = ExperimentMetadata().to_dict(dict(meta), subset)
+                data_signature = __import__('hashlib').md5(str(subset.head(100).to_dicts()).encode()).hexdigest()
+                new_id = de._create_experiment(metadata_fields, data_signature, extra_info)
+                de.conn.register('arrow', subset)
+                de.conn.sql(
+                    'INSERT INTO gene_results (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info) '
+                    'SELECT * REPLACE($id AS experiment_id) FROM arrow',
+                    params={'id': new_id}
+                )
             de.conn.commit()
             return self
         finally:
             de.conn.close()
 
-    
     def df(self):
-        try:
-            import pandas as pd
-            import pyarrow as pa
-        except ImportError:
-            raise DeDuckError('Panda and PyArrow need to be imported in order to convert to dataframe')
-        
-        return pd.DataFrame.from_arrow(self._table)
+        return self._frame.clone()
 
-
-
-def _get_gene_table(species):
-    folder = resources.files('de_quack') / 'gene_tables'
-    return folder / f'{species}_genes.parquet'
-
-def _heal_genes(df, species):
-    cursor = duckdb.connect(get_unique_conn())
-    
-    genes = pl.scan_parquet(_get_gene_table(species)).select('symbol', 'ensembl_id')
-    df = df.lazy()
-    df = df.with_columns(pl.col('gene_symbol').fill_null(pl.lit('')).alias('gene_symbol'))
-    df = df.join(genes, on = 'ensembl_id', how = 'left')
-    df = df.with_columns(pl.col('ensembl_id').fill_null(pl.lit('')).alias('ensembl_id'))
-    df = df.join(
-    genes,
-    left_on="gene_symbol",  
-    right_on="symbol",
-    how="left", 
-    suffix="_on_symbol"
-    )
-    final_df = df.select(pl.coalesce(['symbol', 'gene_symbol']).alias('gene_symbol'),
-                                pl.coalesce(['ensembl_id', 'ensembl_id_on_symbol']).alias('ensembl_id'),
-                                pl.all().exclude(['symbol', 'ensembl_id_on_symbol', 'gene_symbol', 'ensembl_id']))
-    cursor.close()
-    return final_df.collect()
-        
 
 class de_arrows:
-
-    def __new__(cls, *args, metadata = None, ids=None):
+    def __new__(cls, *args, metadata = None, ids=None, keep_ids = False, heal_genes = False, species = None):
         if metadata is None:
             return super().__new__(cls)
         if len(metadata) != len(args):
@@ -358,9 +430,14 @@ class de_arrows:
 
         
         none_de_arrow = [table for table in args if not isinstance(table, de_arrow) and not isinstance(table, de_arrows)]
+        if metadata is None:
+            if len(none_de_arrow) == 0:
+                metadata = []
+            else:
+                raise DeQuackError('Metadata must be provided for non-de_arrow tables')
         if len(args) < 1:
             raise DeQuackError('At least one table must be provided')
-        if metadata and not isinstance(metadata, list):
+        if not isinstance(metadata, list):
             if len(none_de_arrow) == 1:
                 metadata = [metadata]
             else:
@@ -368,21 +445,24 @@ class de_arrows:
         if len(metadata) != len(none_de_arrow):
             raise DeQuackError('Number of metadata dictionaries does not match number of tables')
         if keep_ids == True:
+            if ids is None:
+                ids = [i + 1 for i in range(len(none_de_arrow))]
             if len(ids) != len(none_de_arrow):
                 raise DeQuackError('Number of ids provided does not match number of tables')
             if isinstance(ids, int) and len(none_de_arrow) == 1:
                 ids = [ids]
-            if ids is None:
-                ids = [i + 1 for i in range(len(args))]
         else:
             if ids is None:
+                if any(isinstance(arg, de_arrows) for arg in args):
+                    raise DeQuackError('ids must be provided when combining de_arrows objects')
                 ids = [i + 1 for i in range(len(args))]
             if len(ids) != len(args):
                 raise DeQuackError('Number of ids provided does not match number of tables')
+            
         _check_ids(ids)
         
         
-        self._table, self.experiment_metadata, ids = self.__class__._from_tables(*args, metadata=metadata, ids=ids, heal_genes = heal_genes, species = species)
+        self._table, self.experiment_metadata, ids = self.__class__._from_tables(*args, metadata=metadata, ids=ids, heal_genes = heal_genes, species = species, keep_ids = keep_ids)
         self.id = ids
         self.name = _get_experiment_attribute(self.experiment_metadata, 'experiment_name', ids)
         self.annotation_version = _get_experiment_attribute(self.experiment_metadata, 'annotation_version', ids)
@@ -393,9 +473,20 @@ class de_arrows:
 
     
     def __getattr__(self, name):
-        # Delegate attribute access to the internal nanoarrow table without triggering recursion
         table = object.__getattribute__(self, '_table')
-        return getattr(table, name)
+        attr = getattr(table, name)
+        if not callable(attr):
+            return attr
+
+        def wrapper(*args, **kwargs):
+            result = attr(*args, **kwargs)
+            if isinstance(result, pl.DataFrame):
+                if result.columns == table.columns:
+                    return self.__class__._finalize_table(result, self.experiment_metadata, self.id)
+            
+            return result
+
+        return wrapper
     
     def __setattr__(self, name, value):
         if name in ('_table', 'experiment_metadata', 'name', 'annotation_version', 'contrast', 'file', 'date', 'id', 'model'):
@@ -406,10 +497,6 @@ class de_arrows:
     
     def __getitem__(self, key):
         return self._table[key]
-        
-
-
-
     
     def __len__(self):
         return len(self._table)
@@ -427,34 +514,31 @@ class de_arrows:
         flat = []
         final_ids = [id for id in ids]
         final_args = [arg for arg in args]
-        if keep_ids == True:
-            args = list(args)
-            for arg in args:
-                if isinstance(arg, de_arrow) or isinstance(arg, de_arrows):
+        args = list(args)
+        for arg in final_args:
+            if isinstance(arg, de_arrow) or isinstance(arg, de_arrows):
+                for value in arg.experiment_metadata.values():
+                    metadata.insert(final_args.index(arg), value)
+                if keep_ids == True:
                     table.extend(arg._table)
-                    final_ids.insert(args.index(arg), arg.id)
-                    for value in arg.experiment_metadata.values():
-                        metadata.insert(args.index(arg), value)
+                    final_ids.insert(final_args.index(arg), arg.id)
                     args.remove(arg)
-                    
-        for arg, id in zip(args, ids):
+        for arg, id in zip(final_args, final_ids):
             if isinstance(arg, de_arrow):
-                arg = arg.replace_column(0, pl.lit(id).alias('experiment_id'))
-                metadata.insert(args.index(arg), arg.experiment_metadata[arg.id])
+                arg = arg.with_columns(pl.lit(id).alias('experiment_id'))
+                table.extend(arg._table)
             elif isinstance(arg, de_arrows):
                 if not isinstance(id, list) and not isinstance(id, tuple) or len(id) != len(arg.id):
-                    raise DeQuackError('ids must be a list or tuple for de_arrows objects and must be of same id length')
+                    raise DeQuackError('ids must be a list or tuple for de_arrows objects and must be of same id length for de_arrows')
                 id_lookup = pl.DataFrame({'old_id': arg.id, 'new_id': id}, schema = {'old_id': pl.Int32(), 'new_id': pl.Int32()})
                 arg = arg.join(id_lookup, left_on = 'experiment_id', right_on = 'old_id', how = 'left')
                 arg = arg.with_columns(pl.col('new_id').alias('experiment_id')).select(pl.all().exclude(['old_id', 'new_id']))
-                for old_id in arg.id:
-                    metadata.insert(args.index(arg), arg.experiment_metadata[old_id])
+                table.extend(arg)
             else:
                 arg = _to_polars_table(arg)
                 arg = _order_columns(arg)
                 arg = arg.insert_column(0, pl.lit(id).alias('experiment_id'))
-            table.extend(arg)
-        
+                table.extend(arg)
         for id in final_ids:
             if isinstance(id, list) or isinstance(id, tuple):
                 flat.extend(id)
@@ -463,13 +547,7 @@ class de_arrows:
         _check_ids(flat)
         metadata_fields = _to_metadata(metadata, flat, final_args)
         return table, metadata_fields, flat
-            
-        
-
-        
-                
-            
-            
+    
     @classmethod
     def _from_arrow(cls, table, metadata, ids, columns = None):
         instance = object.__new__(cls)
@@ -489,436 +567,90 @@ class de_arrows:
             instance.columns = _get_array_columns(table)
         return instance
 
-    def _set_id_dict(self, ids: dict):
+    def set_id(self, ids):
+        if len(ids) != len(self.id):
+            raise DeQuackError('Number of provided ids does not match number of existing ids')
+        if isinstance(ids, dict):
+            return self._set_id_dict(ids)
+        elif isinstance(ids, list):
+            return self._set_id_list(ids)
+        raise DeQuackError(f'set_ids expected a dictionary or list, not {type(ids)}')
+    
+    def _set_id_dict(self, ids):
+        df = self._table
         for old_id, new_id in ids.items():
             if old_id not in self.id:
                 raise DeQuackError(f'{old_id} is not in existing ids. Existing ids are {self.id}')
         _check_ids(list(ids.values()))
-        de = de_quackling(get_unique_conn()).connect()
-        try:
-            old_ids = list(ids.keys())
-            new_ids = list(ids.values())
-            ids_rel = de.conn.sql(f'SELECT UNNEST({old_ids}) AS old_id, UNNEST({new_ids}) AS new_id')
-            arrow_table = self._table
-            rel = de.conn.sql(_de_arrows_queries['set_ids'])
-            arrow_table = na.Array(rel)
-            updated_metadata = {new_id : self.experiment_metadata.get(old_id, {}) for old_id, new_id in ids.items()}
-            for old_id in self.experiment_metadata.keys():
-                if old_id not in updated_metadata.keys() and old_id not in old_ids:
-                    updated_metadata[old_id] = self.experiment_metadata[old_id]
-            arrow_table = self._from_arrow(arrow_table, updated_metadata, ids.values())
-            return arrow_table
-        finally:
-            de.conn.close()
-        
+        df = df.with_columns(pl.col('experiment_id').replace(ids).alias('experiment_id'))
+        metadata = {new_id: self.experiment_metadata.get(old_id, {}) for old_id, new_id in ids.items()}
+        return self._from_arrow(df, metadata, ids=list(ids.values()))
 
-    def _set_id_list(self, ids: list):
-        print(self.id)
-        if len(ids) != len(self.id):
+    def _set_id_list(self, ids):
+        current_ids = _ids_from_frame(self._table)
+        if len(ids) != len(current_ids):
             raise DeQuackError('Number of provided ids does not match number of existing ids')
         _check_ids(ids)
-            
-        de=de_quackling(get_unique_conn()).connect()
-        try:
-            ids_rel = de.conn.sql(f'SELECT UNNEST({self.id}) AS old_id, UNNEST({ids}) AS new_id')
-            arrow_table = self._table
-            rel = de.conn.sql(_de_arrows_queries['set_ids'])
-            arrow_table = na.Array(rel)
-            updated_metadata = {new_id: self.experiment_metadata.get(old_id, {}) for old_id, new_id in zip(self.id, ids)}
-            arrow_table = self._from_arrow(arrow_table, updated_metadata, ids)
-            return arrow_table
-        finally:
-            de.conn.close()
+        mapping = dict(zip(current_ids, ids))
+        df = self._table.with_columns(pl.col('experiment_id').replace(mapping).alias('experiment_id'))
+        metadata = {new_id: self.experiment_metadata.get(old_id, {}) for old_id, new_id in mapping.items()}
+        return self._from_arrow(df, metadata, ids=ids)
     
-    def set_id(self, ids):
-        if isinstance(ids, dict):
-            return self._set_id_dict(ids)
-        if isinstance(ids, list):
-            return self._set_id_list(ids)
-        raise DeQuackError(f'set_ids expected a dictionary or a list, not {type(ids)}')
-    
-    def get_upregulated(self, log2fc=0, pvalue=0.05, logCPM=0):
-        required_columns = {'log2fc', 'pvalue', 'logCPM'}
-        _check_columns(required_columns, self.columns)
-        de=de_quackling(get_unique_conn()).fast_connect()
-        try:
-            arrow_table=self._table
-            rel=de.conn.sql(_de_arrow_queries['get_upregulated'], params={'log2fc':log2fc, 'pvalue':pvalue, 'logCPM': logCPM})
-            arrow_table=na.Array(rel)
-            arrow_table = self._finalize_table(arrow_table)
-            return arrow_table
-        finally:
-            de.conn.close()
+    def get_experiment(self, id=None, name=None, model=None, annotation_version=None, normalization=None, date=None, contrast=None, file=None):
+        ids = self.id
+        if not ids:
+            return self._wrap(self._table)
 
-    def get_significant_genes(self, log2fc=1, pvalue=0.05, logCPM=0):
-        required_columns = {'log2fc', 'pvalue', 'logCPM'}
-        _check_columns(required_columns, self.columns)
-        de=de_quackling(get_unique_conn()).fast_connect()
-        try:
-            arrow_table=self._table
-            rel=de.conn.sql(_de_arrow_queries['get_important_genes'], params={'log2fc':log2fc, 'pvalue':pvalue, 'logCPM': logCPM})
-            arrow_table=na.Array(rel)
-            arrow_table=self._finalize_table(arrow_table)
-            return arrow_table
-        finally:
-            de.conn.close()
-    
-    def get_downregulated(self, log2fc=0, pvalue=0.05, logCPM=0):
-        required_columns = {'log2fc', 'pvalue', 'logCPM'}
-        _check_columns(required_columns, self.columns)
-        de=de_quackling(get_unique_conn()).fast_connect()
-        try:
-            arrow_table=self._table
-            rel=de.conn.sql(_de_arrow_queries['get_downregulated'], params={'log2fc':log2fc, 'pvalue':pvalue, 'logCPM': logCPM})
-            arrow_table = na.Array(rel)
-            arrow_table = self._finalize_table(arrow_table)
-            return arrow_table
-        finally:
-            de.conn.close()
-
-    def _finalize_table(self, arrow_table):
-        de = de_quackling(get_unique_conn()).fast_connect()
-        try:
-            ids = de.conn.sql("SELECT DISTINCT experiment_id FROM arrow_table").fetchall()
-            ids = [id[0] for id in ids]
-            new_metadata = {}
-            for id in ids:
-                new_metadata[id] = self.experiment_metadata.get(id, '')
-            if len(ids) < 2:
-                if ids is None:
-                    return de_arrow._from_arrow(arrow_table, {}, None)
-                return de_arrow._from_arrow(arrow_table, self.experiment_metadata[ids[0]], id)
-            return self._from_arrow(arrow_table, new_metadata, ids)
-        finally:
-            de.conn.close()
-    
-    def add_experiment(self, data, metadata = None, id = None):
-        if isinstance(data, de_arrow):
-            return self._add_experiment_arrow(data, metadata, id)
-        if isinstance(data, de_arrows):
-            if metadata is not None:
-                if not isinstance(metadata, list) or not isinstance(metadata[0], dict):
-                    raise DeQuackError('Metadata must be a list of dictionaries for de_arrows objects!')
-                if len(id) != len(data.id):
-                    raise DeQuackError('Length of id list does not match length of incoming de_arrows object')
-            return self._add_experiment_arrows(data, metadata, id)
-        return self._add_experiment_data(data, metadata, id)
-
-    
-    def _add_experiment_arrows(self, data, metadata = None, ids = None):
-        de = de_quackling(get_unique_conn()).fast_connect()
-        try:
-            arrow_table = self._table
-            if ids is None:
-                ids = data.id
-                _check_ids(ids + self.id)
-            else:
-                _check_ids(ids + self.id)
-            self_metadata = self.experiment_metadata
-            if metadata is None:
-                new_metadata = data.experiment_metadata
-                for id, value in zip(ids, new_metadata.values()):
-                    self_metadata[id] = value
-            else:
-                new_metadata = metadata
-                for meta, id in zip(ids, new_metadata):
-                    m, extra_info = ExperimentMetadata.to_dict(new_metadata)
-                    for key, value in extra_info.items():
-                        m[key] = value
-                    self_metadata[n] = m
-            arrow_table = de.conn.sql("SELECT * FROM arrow_table UNION ALL SELECT * FROM data")
-            arrow_table = na.Array(arrow_table)
-            ids = [id for id in self_metadata.keys()]
-            return self._from_arrow(arrow_table, self_metadata, ids)
-        finally:
-            de.conn.close()
-        
-        
-    def _add_experiment_arrow(self, data, metadata = None, id = None):
-        arrow_table = self._table
-        if not isinstance(id, int) and id is not None:
-            raise DeQuackError('id has to be an integer')
-        de = de_quackling(get_unique_conn()).fast_connect()
-        try:
-            new_metadata = ExperimentMetadata.to_dict(metadata) if metadata is not None else data.experiment_metadata
-            id = id if id is not None else data.id
-            if id in self.id:
-                raise DeQuackError('Duplicate ids found')
-            metadata = self.experiment_metadata
-            arrow_table = de.conn.sql("SELECT * FROM arrow_table UNION ALL SELECT * FROM data")
-            arrow_table = na.Array(arrow_table)
-            metadata[id] = list(new_metadata.values())[0]
-            ids = self.id
-            ids.append(id)
-            return self._from_arrow(arrow_table, metadata, ids)
-        finally:
-            de.conn.close()
-
-    def _add_experiment_data(self, data, metadata = None, id = None):
-        arrow_table = self._table
-        if metadata is None:
-            raise DeQuackError('No metadata provided for the data')
-        if id is None:
-            raise DeQuackError('No id provided')
-        de = de_quackling(get_unique_conn()).connect()
-        try:
-            new_metadata, extra_info=ExperimentMetadata().to_dict(metadata, data)
-            for key, value in json.loads(extra_info).items():
-                new_metadata[key]=value
-            new_metadata={id: new_metadata}
-            de._preprocess(data)
-            de_arrow_insertion_view = de._create_temp_view()
-            data = de.conn.sql(_de_arrow_queries['insert_to_de_arrow'], params={'id':id})
-            if id in self.id:
-                raise DeQuackError('Duplicate ids found')
-            metadata = self.experiment_metadata
-            arrow_table = de.conn.sql("SELECT * FROM arrow_table UNION ALL SELECT * FROM data")
-            arrow_table = na.Array(arrow_table)
-            metadata[id] = new_metadata[id]
-            ids = self.id
-            ids.append(id)
-            return self._from_arrow(arrow_table, metadata, ids)
-        finally:
-            de.conn.close()
-    
-    def get_experiment(self, id = None, name = None, model = None, annotation_version = None,  normalization = None, date = None, contrast = None, file = None):
-        try:
-            date = datetime.datetime.strptime(date, '%Y-%m-%d').date() if date else None
-        except ValueError:
-            raise ProcessingError(f"Invalid date format: {date}. Expected format is YYYY-MM-DD.")
-        metadata = self.experiment_metadata
-        selected_metadata = set(self.id)
-        not_selected = set([])
+        selected_ids = set(ids)
         if id is not None:
             if isinstance(id, list):
-                selected_metadata = set([i for i in self.id if i in id])
-            elif isinstance(id, int):
-                selected_metadata = {id}
-        if name is not None:
-            if isinstance(name, list):
-                name = [n.lower().strip() for n in name]
-                not_selected.update([i for i, n in self.name.items() if n.lower.strip() not in name])
-            elif isinstance(name, str):
-                not_selected.update([i for i, n in self.name.items() if n.lower() not in name.lower()])
-        if model is not None:
-            if isinstance(model, list):
-                model = [n.lower().strip() for n in model]
-                not_selected.update([i for i, n in self.model.items() if n.lower.strip() not in model])
-            elif isinstance(model, str):
-                not_selected.update([i for i, n in self.model.items() if n.lower() not in model.lower()])
-        if annotation_version is not None:
-            if isinstance(annotation_version, list):
-                annotation_version = [n.lower().strip() for n in annotation_version]
-                not_selected.update([i for i, n in self.annotation_version.items() if n.lower.strip() not in annotation_version])
-            elif isinstance(annotation_version, str):
-                not_selected.update([i for i, n in self.annotation_version.items() if n.lower() not in annotation_version.lower()])
-        if normalization is not None:
-            if isinstance(normalization, list):
-                normalization = [n.lower().strip() for n in normalization]
-                not_selected.update([i for i, n in self.normalization.items() if n.lower.strip() not in normalization])
-            elif isinstance(normalization, str):
-                not_selected.update([i for i, n in self.normalization.items() if n.lower() not in normalization.lower()])
-        if date is not None:
-            if isinstance(date, list):
-                selected_metadata.update([i for i, n in self.date.items() if n not in date])
-            elif isinstance(date, datetime.date):
-                not_selected.update([i for i, n in self.date.items() if n != date])
-        if contrast is not None:
-            if isinstance(contrast, list):
-                contrast = [n.lower().strip() for n in contrast]
-                not_selected.update([i for i, n in self.contrast.items() if n.lower.strip() not in contrast])
-            elif isinstance(contrast, str):
-                not_selected.update([i for i, n in self.contrast.items() if n.lower() not in contrast.lower()])
-        if file is not None:
-            if isinstance(file, list):
-                file = [n.lower().strip() for n in file]
-                not_selected.update([i for i, n in self.file.items() if n.lower.strip() not in file])
-            elif isinstance(file, str):
-                not_selected.update([i for i, n in self.file.items() if n.lower() not in file.lower()])
-        
-        selected_metadata = list(selected_metadata - not_selected)
-        if len(selected_metadata) == 0:
+                selected_ids = {item for item in ids if item in id}
+            else:
+                selected_ids = {item for item in ids if item == id}
+
+        metadata = self.experiment_metadata or {}
+        if any(value is not None for value in [name, model, annotation_version, normalization, date, contrast, file]):
+            if not metadata:
+                raise ProcessingError('Experiment metadata is not available for this frame')
+
+            def matches(meta):
+                def text_match(field_value, expected):
+                    if expected is None:
+                        return True
+                    if field_value is None:
+                        return False
+                    if isinstance(expected, list):
+                        expected_values = [str(item).lower().strip() for item in expected]
+                        return str(field_value).lower().strip() in expected_values
+                    return str(expected).lower().strip() in str(field_value).lower().strip()
+
+                return (
+                    text_match(meta.get('experiment_name'), name) and
+                    text_match(meta.get('model'), model) and
+                    text_match(meta.get('annotation_version'), annotation_version) and
+                    text_match(meta.get('normalization'), normalization) and
+                    text_match(meta.get('contrast'), contrast) and
+                    text_match(meta.get('file'), file) and
+                    (date is None or str(meta.get('date')) == str(date))
+                )
+
+            selected_ids = {item for item in selected_ids if matches(metadata.get(item, {}))}
+
+        if not selected_ids:
             raise DeQuackError('No experiments found with the provided metadata')
 
-        de = de_quackling(get_unique_conn()).fast_connect()
-        try:
-            arrow_table = self._table
-            rel = de.conn.sql(_de_arrows_queries['get_experiment'], params = {
-                'ids': selected_metadata
-            })
-            arrow_table = na.Array(rel)
-            return self._finalize_table(arrow_table)
-        finally:
-            de.conn.close()
-
-    def get_gene(self, gene_symbol = None, ensembl_id = None, id = None):
-        required_columns = {'gene_symbol', 'ensembl_id'}
-        _check_columns(required_columns, self.columns)
-        de = de_quackling(get_unique_conn()).fast_connect()
-        try:
-            arrow_table = self._table
-            rel = de.conn.sql(_de_arrows_queries['get_gene'], 
-            params = {
-            'gene_symbol': gene_symbol,
-            'ensembl_id': ensembl_id,
-            'id': id
-            })
-            arrow_table = na.Array(rel)
-            return self._finalize_table(arrow_table)
-        finally:
-            de.conn.close()
+        frame = self._table.filter(pl.col('experiment_id').is_in(list(selected_ids))) if 'experiment_id' in self.columns else self._frame
+        return self._finalize_table(frame)
     
-    def insert(self, file):
-        required_columns = {'padj', 'pvalue', 'log2fc', 'gene_symbol', 'ensembl_id', 'logCPM', 'stat', 'other_info', 'experiment_id'}
-        _check_columns(required_columns, self.columns)
-        if not isinstance(file, str):
-            raise TypeError(f'file must be a string, not {type(file)}')
-        arrow_table = self._table
-        metadata = self.experiment_metadata
-        new_meta = []
-        for meta in metadata.values():
-            m, other_info = ExperimentMetadata().to_dict(meta, None)
-            new_meta.append((m, other_info))
-        de = de_quackling(file).connect()
-        try:
-            tables = []
-            for id in self.id:
-                rel = de.conn.sql('SELECT * FROM arrow_table WHERE experiment_id = $id', params = {'id': id})
-                tables.append(na.Array(rel))
-            for meta, table in zip(new_meta, tables):
-                arrow = table
-                sample_data = de.conn.execute('SELECT * FROM (SELECT * FROM arrow LIMIT 100)').fetchall()
-                data_sig = hashlib.md5(str(sample_data).encode()).hexdigest()
-                id = de._create_experiment(meta[0], data_sig, meta[1])
-                de.conn.sql('INSERT INTO gene_results (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info) SELECT * REPLACE($id AS experiment_id) FROM arrow', params = {'id': id})
-            de.conn.commit()
-            return self
-        finally:
-            de.conn.close()
-
-            
-
-
-        
+    def _finalize_table(self, df):
+        df_ids = df.select('experiment_id').unique().to_series().to_list() if 'experiment_id' in df.columns else []
+        metadata = {}
+        for id in df_ids:
+            metadata[id] = self.experiment_metadata.get(id, {})
+        if len(df_ids) < 2:
+            return de_arrow.from_arrow(df, metadata, df_ids[0])
+        return self._from_arrow(df, metadata, df_ids)
     
-    def df(self):
-        try:
-            import pandas as pd
-            import pyarrow as pa
-        except ImportError:
-            raise DeDuckError('Panda and PyArrow need to be imported in order to convert to dataframe')
-        
-        return pd.DataFrame.from_arrow(self._table)
-
-    
-
-
-def get_unique_conn():
-    unique_id = uuid.uuid4().hex[:8]
-    return(f':memory:de_quack_{unique_id}')
-
-def _get_experiment_attribute(metadata, field, ids):
-    if isinstance(ids, list):
-        return {id: metadata.get(id, {}).get(field) for id in ids}
-    else:
-        return {ids: metadata.get(ids, {}).get(field)}
-
-def _check_columns(required_columns, columns):
-        missing_columns = required_columns - set(columns)
-        if missing_columns:
-            raise DeQuackError(f'De_arrow object is missing {missing_columns} for this function')
-
-def _check_ids(ids):
-    for id in ids:
-        if ids.count(id) > 1:
-            raise DeQuackError(f'id {id} occurs multiple times in object ids')
-        if isinstance(id, str):
-            raise TypeError('String found in id list')
-
-def _to_metadata(metadata, id, tables):
-    meta_list = []
-    to_remove_tables = []
-    to_remove_metadata = []
-    print(metadata)
-    for table in tables:
-        if isinstance(table, de_arrows):
-            to_remove_tables.append(table)
-            print(table.experiment_metadata)
-            for n in table.id:
-                print(metadata.index(table.experiment_metadata[n]) + table.id.index(n))
-                m = metadata[metadata.index(table.experiment_metadata[n]) + table.id.index(n)]
-                meta_list.append(m)
-                to_remove_metadata.append(m)
-    for table in to_remove_tables:
-        tables.remove(table)
-    for meta in to_remove_metadata:
-        metadata.remove(meta)
-    for meta, table in zip(metadata, tables):
-        print(meta, table)
-        if isinstance(table, de_arrow):
-            meta_list.append(meta)
-        else:
-            m, extra_info = ExperimentMetadata().to_dict(meta, table)
-            extra_info = json.loads(extra_info)
-            for key, value in extra_info.items():
-                m[key] = value
-            meta_list.append(m)
-    
-    metadata_dict = {}
-    for meta, id in zip(meta_list, id):
-        metadata_dict[id] = meta
-    return metadata_dict
-
-            
-
-def _to_polars_table(table):
-    if isinstance(table, str):
-        path = os.path.abspath(table)
-        if os.path.exists(path):
-            if path.endswith('.parquet'):
-                return pl.read_parquet(path)
-            else:
-                with open(path, 'r') as f:
-                    first_line = f.readline()
-                    separator = "\t" if "\t" in first_line else (";" if ";" in first_line else ",")
-                return pl.read_csv(path, separator=separator)
-    class_name = table.__class__.__name__
-    if class_name == 'Table':
-        return pl.from_arrow(table)
-    if class_name == 'DataFrame':
-        return pl.from_pandas(table)
-    raise ValueError(f"Unsupported table type: {class_name}. Supported types are: str (file path), pyarrow.Table, pandas.DataFrame.")
-
-def _order_columns(df):
-    columns = df.columns
-    extra_columns = [col for col in columns if col not in _GENE_ALIAS_TO_COLUMN.values()]
-    real_columns = [_GENE_ALIAS_TO_COLUMN.get(col.lower()) for col in columns if _GENE_ALIAS_TO_COLUMN.get(col.lower())]
-    essential_cols = {'padj', 'log2fc', 'padj'}
-    if essential_cols - set(real_columns):
-        raise DeQuackError(f'Missing essential columns: {essential_cols - set(real_columns)}')
-    df = df.rename({col: _GENE_ALIAS_TO_COLUMN.get(col.lower()) for col in columns if _GENE_ALIAS_TO_COLUMN.get(col.lower())})
-    if 'gene_name' in df.columns:
-        sample = df.select('gene_name').to_series().head(1).to_list()
-        if re.match('^ENS', sample[0]):
-            if 'ensembl_id' not in df.columns:
-                df = df.rename({'gene_name': 'ensembl_id'})                 
-        else:
-            if 'gene_symbol' not in df.columns:
-                df = df.rename({'gene_name': 'gene_symbol'})
-    expressions = []
-    for col in _gene_columns:
-        if col in df.columns:
-            expressions.append(pl.col(col))
-        else:
-            expressions.append(pl.lit(None).alias(col))
-    extra_columns = set([col for col in df.columns if col not in _gene_columns and col != 'experiment_id'])
-    if not extra_columns:
-        expressions.append(pl.lit(None).alias('other_info'))
-    else:
-        expressions.append(pl.struct(extra_columns).struct.json_encode().alias('other_info'))
-    df = df.select(expressions)
-
-    return df
 
 
 

@@ -65,8 +65,16 @@ class de_quackling:
         and sequences if they do not already exist.
         """
         self.conn = duckdb.connect(self.db_path)
+        tables = self.conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='main'").fetchall()
+        self.tables = [table[0] for table in tables]
+        if 'gene_results' not in self.tables:
+            self._initialize_tables()
 
-        # Maintain a sequence for experiment primary keys.
+        self.gene_columns = self.conn.execute("SELECT * FROM information_schema.columns WHERE table_name='gene_results'").fetchall()
+        self.experiment_columns = self.conn.execute("SELECT * FROM information_schema.columns WHERE table_name='experimental_data'").fetchall()
+        return self
+    
+    def _initialize_tables(self):
         self.conn.execute('''CREATE SEQUENCE IF NOT EXISTS seq_experiment_id START 1''')
 
         # Create tables if they don't already exist.
@@ -109,14 +117,6 @@ class de_quackling:
         
         # Create indexes
         self.conn.execute('CREATE INDEX IF NOT EXISTS idx_gene_name_lookup ON gene_results(gene_symbol, experiment_id)')
-        
-        # Get table and column information
-        self.tables = self.conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='main'").fetchall()
-        self.gene_columns = self.conn.execute("SELECT * FROM information_schema.columns WHERE table_name='gene_results'").fetchall()
-        self.experiment_columns = self.conn.execute("SELECT * FROM information_schema.columns WHERE table_name='experimental_data'").fetchall()
-        
-        
-        return self
     
     def __exit__(self, exc_type, exc_value, traceback):
         """Close the DuckDB connection when leaving the context manager."""
@@ -163,9 +163,7 @@ class de_quackling:
 
         for incoming_col, real_col in columns_info:
             all_columns.append(incoming_col)
-            # real_col may be None if no alias matched
             if real_col == 'gene_name':
-                # sample a real cell value from this incoming column (avoid placeholder misuse)
                 sample = temp_view.select(ColumnExpression(incoming_col)).limit(1).fetchone()
                 sample_val = sample[0] if sample is not None else None
                 if sample_val is not None and re.match(r'^ENS', str(sample_val)):
@@ -246,7 +244,7 @@ class de_quackling:
         class_name = info.__class__.__name__.lower()
         self.conn.execute('DROP VIEW IF EXISTS preprocessed_data')
 
-        if class_name == 'de_arrow':
+        if class_name in {'de_arrow', 'de_arrows'}:
             self.conn.register('info', info._table)
             self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
             return
@@ -334,25 +332,26 @@ class de_quackling:
 
         self.conn.execute('''
         INSERT INTO gene_results (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info)
-        SELECT ? AS experiment_id,
+        SELECT $1 AS experiment_id,
             COALESCE(ens.symbol, sym.symbol, e.gene_symbol) AS gene_symbol,
             COALESCE(ens.ensembl_id, sym.ensembl_id, e.ensembl_id) AS ensembl_id,
-            COALESCE(TRY_CAST(e.log2fc AS DOUBLE), NULL),
-            COALESCE(TRY_CAST(e.logCPM AS DOUBLE), log2(e.base_mean + 1), NULL),
-            COALESCE(TRY_CAST(e.pvalue AS DOUBLE), NULL),
-            COALESCE(TRY_CAST(e.padj AS DOUBLE), NULL),
-            COALESCE(TRY_CAST(e.stat AS DOUBLE), NULL),
+            COALESCE(TRY_CAST(e.log2fc AS DOUBLE), NULL) AS log2fc,
+            COALESCE(TRY_CAST(e.logCPM AS DOUBLE), log2(e.base_mean + 1), NULL) AS logCPM,
+            COALESCE(TRY_CAST(e.pvalue AS DOUBLE), NULL) AS pvalue,
+            COALESCE(TRY_CAST(e.padj AS DOUBLE), NULL) AS padj,
+            COALESCE(TRY_CAST(e.stat AS DOUBLE), NULL) AS stat,
             e.other_info
         FROM view as e
         LEFT JOIN genes ens ON  (
             e.ensembl_id IS NOT NULL AND ens.ensembl_id = UPPER(TRIM(e.ensembl_id))
         )
 
-        LEFT JOIN genes sym ON (
-            sym.species = ? AND
-            (e.gene_symbol IS NOT NULL AND sym.symbol = UPPER(TRIM(e.gene_symbol)) OR
-            e.gene_symbol IS NOT NULL AND sym.prev_symbol IS NOT NULL AND list_contains(sym.prev_symbol, e.gene_symbol))
-            )
+        LEFT JOIN genes sym ON 
+            (e.gene_symbol IS NOT NULL AND sym.symbol = e.gene_symbol) OR
+            e.gene_symbol IS NOT NULL AND sym.prev_symbol IS NOT NULL AND list_contains(sym.prev_symbol, e.gene_symbol)
+            
+        
+        WHERE (sym.species IS NULL OR sym.species = $2) AND (ens.species IS NULL OR ens.species = $2)
         
         
         ''', (experiment_id, species))
@@ -381,142 +380,74 @@ class de_quackling:
         metadata_fields, other_info = ExperimentMetadata().to_dict(metadata, info)
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
-        print(elapsed_time)
+        print(f"Time taken to validate metadata: {elapsed_time:.4f} seconds")
         
         start_time = time.perf_counter()
         self._preprocess(info) 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
-        print(elapsed_time)
+        print(f"Time taken to preprocess data: {elapsed_time:.4f} seconds")
 
         start_time = time.perf_counter()
         data_signature = self._get_data_signature()
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
-        print(elapsed_time)
+        print(f"Time taken to get data signature: {elapsed_time:.4f} seconds")
 
         start_time = time.perf_counter()
         id = self._create_experiment(metadata_fields, data_signature, other_info)
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
-        print(elapsed_time)
+        print(f"Time taken to create experiment: {elapsed_time:.4f} seconds")
 
         start_time = time.perf_counter()
         view=self._create_temp_view()
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
-        print(elapsed_time)
+        print(f"Time taken to create temporary view: {elapsed_time:.4f} seconds")
 
-        start_time = time.perf_counter()
         self._insert_gene_results(id, view, species)
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        print(elapsed_time)
-    
+        
+
     def get_experiment(self, id = None, name = None, model = None, annotation_version = None,  normalization = None, date = None, contrast = None, file = None):
         try:
             date = datetime.datetime.strptime(date, '%Y-%m-%d').date() if date else None
         except ValueError:
             raise ProcessingError(f"Invalid date format: {date}. Expected format is YYYY-MM-DD.")
-
-        rel = self.conn.sql(core_queries['get_experiment'], params = {
-            'experiment_id': id,
-            'experiment_name': name,
-            'model': model,
-            'annotation_version': annotation_version,
-            'normalization': normalization,
-            'date': date,
-            'contrast': contrast,
-            'file': file
-        })
-        
-        meta_rel = rel.select(', '.join(experiment_columns)).distinct()
-        rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info')
-        metadata_list = [dict(zip(experiment_columns, row)) for row in meta_rel.fetchall()]
+        start_time = time.perf_counter()
+        rel = self.conn.execute(core_queries['get_experiment'], [id, date, model, file, name, contrast, annotation_version, normalization]).fetchall()
+        metadata_list = [dict(zip(experiment_columns, row)) for row in rel]
         metadata_fields, ids = _to_metadata(metadata_list)
-        schema = na.Schema(na.Type.INT64)
-        table = na.Array(rel, schema)
-        return _get_de_arrows(table, metadata_fields, ids)
+        end_time = time.perf_counter()
+        print(f"Time taken to fetch experiment metadata: {end_time - start_time:.4f} seconds")
+        start_time = time.perf_counter()
+        self.conn.execute(f'CREATE OR REPLACE TEMP TABLE ids AS SELECT UNNEST({ids}) AS id')
+        df = self.conn.execute('SELECT * exclude(ids.id) FROM gene_results g JOIN ids ON g.experiment_id = ids.id').pl()
+        end_time = time.perf_counter()
+        print(f"Time taken to fetch gene results: {end_time - start_time:.4f} seconds")
+        return _get_de_arrows(df, metadata_fields, ids)
+        
     
     def get_significant_genes(self, log2fc = 1, padj = 0.05, logCPM = 1, id = None):
-        rel = self.conn.sql(core_queries['get_significant'], 
-        params = {
-        'log2fc': log2fc,
-        'padj': padj,
-        'logCPM': logCPM,
-        'id': id
-        })
-        meta_rel = rel.select(', '.join(experiment_columns)).distinct()
-        rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info')
-        metadata_list = [dict(zip(experiment_columns, row)) for row in meta_rel.fetchall()]
-        metadata_fields, ids = _to_metadata(metadata_list)
-        schema = na.Schema(na.Type.INT64)
-        table = na.Array(rel, schema)
-        return _get_de_arrows(table, metadata_fields, ids)
+        df = self.conn.execute('SELECT * FROM gene_results WHERE abs(log2fc) > $1 AND padj < $2 AND logCPM > $3 AND experiment_id = $4 OR $4 IS NULL', [log2fc, padj, logCPM, id]).pl()
+        return self._polars_to_de_arrows(self.conn, df)
 
     def get_upregulated(self, log2fc = 1, padj = 0.05, logCPM = 1, id = None):
-
         start_time = time.perf_counter()
-        rel = self.conn.sql(core_queries['get_upregulated'], 
-        params = {
-        'log2fc': log2fc,
-        'padj': padj,
-        'logCPM': logCPM,
-        'id': id
-        })
+        df = self.conn.execute('SELECT * FROM gene_results WHERE log2fc > $1 AND padj < $2 AND logCPM > $3 AND experiment_id = $4 OR $4 IS NULL', [log2fc, padj, logCPM, id]).pl()
         end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        print(elapsed_time)
-
-        start_time = time.perf_counter()
-        meta_rel = rel.select(', '.join(experiment_columns)).distinct()
-        rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info').pl()
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        print(elapsed_time)
-
-        metadata_list = [dict(zip(experiment_columns, row)) for row in meta_rel.fetchall()]
-        metadata_fields, ids = _to_metadata(metadata_list)
-        schema = na.Schema(na.Type.INT64)
-
-        start_time = time.perf_counter()
-        print(rel)
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        print(elapsed_time)
-
-        return _get_de_arrows(table, metadata_fields, ids)
+        print(f"Time taken to execute query for upregulated genes: {end_time - start_time:.4f} seconds")
+        arrow = self._polars_to_de_arrows(df)
+        return arrow
+        
     
     def get_downregulated(self, log2fc = -1, padj = 0.05, logCPM = 1, id = None):
-        rel = self.conn.sql(core_queries['get_downregulated'], 
-        params = {
-        'log2fc': log2fc,
-        'padj': padj,
-        'logCPM': logCPM,
-        'id': id
-        })
-        meta_rel = rel.select(', '.join(experiment_columns)).distinct()
-        rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info')
-        metadata_list = [dict(zip(experiment_columns, row)) for row in meta_rel.fetchall()]
-        metadata_fields, ids = _to_metadata(metadata_list)
-        schema = na.Schema(na.Type.INT64)
-        table = na.Array(rel, schema)
-        return _get_de_arrows(table, metadata_fields, ids)
-    
+        df = self.conn.execute('SELECT * FROM gene_results WHERE log2fc < $1 AND padj < $2 AND logCPM > $3 AND (experiment_id = $4 OR $4 IS NULL)', [log2fc, padj, logCPM, id]).pl()
+        return self._polars_to_de_arrows(df)
+
     def get_gene(self, gene_symbol = None, ensembl_id = None, id = None):
-        rel = self.conn.sql(core_queries['get_gene'], 
-        params = {
-        'gene_symbol': gene_symbol,
-        'ensembl_id': ensembl_id,
-        'id': id
-        })
-        meta_rel = rel.select(', '.join(experiment_columns)).distinct()
-        rel = rel.select('experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info')
-        metadata_list = [dict(zip(experiment_columns, row)) for row in meta_rel.fetchall()]
-        metadata_fields, ids = _to_metadata(metadata_list)
-        schema = na.Schema(na.Type.INT64)
-        table = na.Array(rel, schema)
-        return _get_de_arrows(table, metadata_fields, ids)
+        rel = self.conn.execute('SELECT * FROM gene_results WHERE (gene_symbol = $1 OR $1 IS NULL) AND (ensembl_id = $2 OR $2 IS NULL) AND (experiment_id = $3 OR $3 IS NULL)', [gene_symbol, ensembl_id, id]).pl()
+        return self._polars_to_de_arrows(rel)
 
     def delete_experiment(self, id = None, name = None, model = None, annotation_version = None,  normalization = None, date = None, contrast = None, file = None):
         try:
@@ -543,6 +474,38 @@ class de_quackling:
                 'ids': ids})
         finally:
             self.conn.commit()
+    
+    def _polars_to_de_arrows(self, df):
+        if len(df.columns) == 0:
+            return self._get_de_arrows(df, {}, [])
+        start_time = time.perf_counter()
+        ids = df['experiment_id'].unique().to_list()
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        print(f"Time taken to extract unique experiment IDs: {elapsed_time:.4f} seconds")
+        start_time = time.perf_counter()
+        meta_rel = self.conn.execute(
+            '''
+            SELECT
+                experiment_id,
+                model,
+                date,
+                file,
+                experiment_name,
+                contrast,
+                annotation_version,
+                normalization,
+                other_info AS extra_info
+            FROM experimental_data
+            WHERE experiment_id = ANY(?)
+            ''',
+            [ids]
+        )
+        end_time = time.perf_counter()
+        print(f"Time taken to fetch metadata: {end_time - start_time:.4f} seconds")
+        metadata_list = [dict(zip(experiment_columns, row)) for row in meta_rel.fetchall()]
+        metadata_fields, ids = _to_metadata(metadata_list)
+        return _get_de_arrows(df, metadata_fields, ids)
         
             
 
@@ -566,7 +529,7 @@ class de_quackling:
     
 def _get_de_arrows(arrows, metadata, ids):
     from .arrow import de_arrows, de_arrow
-    if len(ids) == 1:
+    if len(ids) < 2:
         return de_arrow._from_arrow(arrows, metadata, ids)
     return de_arrows._from_arrow(arrows, metadata, ids)
 
@@ -583,6 +546,8 @@ def _to_metadata(metadata_list):
     ids = [meta.pop('experiment_id') for meta in metadata_list]
     metadata_fields = {exp_id: meta for meta, exp_id in zip(metadata_list, ids)}
     return metadata_fields, ids
+
+
 
 
 

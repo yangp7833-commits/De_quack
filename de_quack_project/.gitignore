@@ -2,6 +2,7 @@
 # Ignore any local test databases you create
 *.duckdb
 data.txt
+new_data_csv
 
 # --- Python Junk ---
 # Ignore Python's automatic background calculation folders

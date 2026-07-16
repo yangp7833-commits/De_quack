@@ -179,40 +179,20 @@ CORE_QUERIES = {
                             e.annotation_version,
                             e.normalization,
                             e.other_info AS extra_info,
-                            g.experiment_id,
-                            g.gene_symbol,
-                            g.ensembl_id,
-                            g.log2fc,
-                            g.logCPM,
-                            g.pvalue,
-                            g.padj,
-                            g.stat,
-                            g.other_info
                         FROM experimental_data e
-                        LEFT JOIN gene_results g ON
-                            e.experiment_id = g.experiment_id
                         
                         WHERE 
-                            ($experiment_id IS NULL OR e.experiment_id = $experiment_id) AND
-                            ($date IS NULL OR e.date = $date) AND
-                            ($model IS NULL OR e.model LIKE '%' || $model || '%') AND
-                            ($file IS NULL OR e.file LIKE '%' || $file || '%') AND
-                            ($experiment_name IS NULL OR e.experiment_name LIKE '%' || $experiment_name || '%') AND
-                            ($contrast IS NULL OR e.contrast LIKE '%' || $contrast || '%') AND
-                            ($annotation_version IS NULL OR e.annotation_version LIKE '%' || $annotation_version || '%') AND
-                            ($normalization IS NULL OR e.normalization LIKE '%' || $normalization || '%')
+                            ($1 IS NULL OR e.experiment_id = $1) AND
+                            ($2 IS NULL OR e.date = $2) AND
+                            ($3 IS NULL OR e.model LIKE '%' || $3 || '%') AND
+                            ($4 IS NULL OR e.file LIKE '%' || $4 || '%') AND
+                            ($5 IS NULL OR e.experiment_name LIKE '%' || $5 || '%') AND
+                            ($6 IS NULL OR e.contrast LIKE '%' || $6 || '%') AND
+                            ($7 IS NULL OR e.annotation_version LIKE '%' || $7 || '%') AND
+                            ($8 IS NULL OR e.normalization LIKE '%' || $8 || '%')
                      ''',
     'get_significant': '''
                         SELECT
-                            e.experiment_id,
-                            e.model,
-                            e.date,
-                            e.file,
-                            e.experiment_name,
-                            e.contrast,
-                            e.annotation_version,
-                            e.normalization,
-                            e.other_info AS extra_info,
                             g.experiment_id,
                             g.gene_symbol,
                             g.ensembl_id,
@@ -222,9 +202,7 @@ CORE_QUERIES = {
                             g.padj,
                             g.stat,
                             g.other_info
-                        FROM experimental_data e
-                        LEFT JOIN gene_results g ON
-                            e.experiment_id = g.experiment_id
+                        FROM gene_results g
                         WHERE 
                             abs(g.log2fc) >= $log2fc AND
                             g.logCPM >= $logCPM AND
@@ -233,15 +211,6 @@ CORE_QUERIES = {
                             ''',
     'get_upregulated': '''
                         SELECT
-                            e.experiment_id,
-                            e.model,
-                            e.date,
-                            e.file,
-                            e.experiment_name,
-                            e.contrast,
-                            e.annotation_version,
-                            e.normalization,
-                            e.other_info AS extra_info,
                             g.experiment_id,
                             g.gene_symbol,
                             g.ensembl_id,
@@ -251,25 +220,15 @@ CORE_QUERIES = {
                             g.padj,
                             g.stat,
                             g.other_info
-                        FROM experimental_data e
-                        LEFT JOIN gene_results g ON
-                            e.experiment_id = g.experiment_id
+                        FROM gene_results g
                         WHERE 
                             g.log2fc >= $log2fc AND
                             g.logCPM >= $logCPM AND
                             g.padj <= $padj AND
-                            ($id IS NULL OR g.experiment_id = $id)''',
+                            ($id IS NULL OR g.experiment_id = $id)
+                            ''',
     'get_downregulated': '''
                             SELECT
-                            e.experiment_id,
-                            e.model,
-                            e.date,
-                            e.file,
-                            e.experiment_name,
-                            e.contrast,
-                            e.annotation_version,
-                            e.normalization,
-                            e.other_info AS extra_info,
                             g.experiment_id,
                             g.gene_symbol,
                             g.ensembl_id,
@@ -279,9 +238,7 @@ CORE_QUERIES = {
                             g.padj,
                             g.stat,
                             g.other_info
-                        FROM experimental_data e
-                        LEFT JOIN gene_results g ON
-                            e.experiment_id = g.experiment_id
+                        FROM gene_results g
                         WHERE 
                             g.log2fc <= $log2fc AND
                             g.logCPM >= $logCPM AND
@@ -290,15 +247,6 @@ CORE_QUERIES = {
     
     'get_gene': '''
                     SELECT
-                            e.experiment_id,
-                            e.model,
-                            e.date,
-                            e.file,
-                            e.experiment_name,
-                            e.contrast,
-                            e.annotation_version,
-                            e.normalization,
-                            e.other_info AS extra_info,
                             g.experiment_id,
                             g.gene_symbol,
                             g.ensembl_id,
@@ -308,12 +256,10 @@ CORE_QUERIES = {
                             g.padj,
                             g.stat,
                             g.other_info
-                        FROM experimental_data e
-                        LEFT JOIN gene_results g ON
-                            e.experiment_id = g.experiment_id
+                        FROM gene_results g
                         WHERE 
                             ($id IS NULL OR g.experiment_id = $id) AND
-                            ($gene_symbol IS NULL OR g.gene_symbol = $id) AND
+                                ($gene_symbol IS NULL OR g.gene_symbol = $gene_symbol) AND
                             ($ensembl_id IS NULL OR g.ensembl_id = $ensembl_id)
                             ''',
     'find_delete_experiment': '''
@@ -343,7 +289,7 @@ CORE_QUERIES = {
 gene_mapping = {'mouse_genes': '''
             INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
             SELECT 
-                csv_data.column03 as symbol, 
+                UPPER(TRIM(csv_data.column03)) as symbol,
                 CAST(regexp_replace(csv_data.column00, '^MGI:', '', 'i') AS INTEGER) AS id, 
                 csv_data.column10 as ensembl_id,
                 NULL AS alias_symbol, 
@@ -354,7 +300,7 @@ gene_mapping = {'mouse_genes': '''
             'human_genes': '''
             INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
             SELECT 
-                csv_data.symbol, 
+                UPPER(TRIM(csv_data.symbol)) as symbol, 
                 CAST(regexp_replace(csv_data.hgnc_id, '^hgnc:', '', 'i') AS INTEGER) AS id, 
                 csv_data.ensembl_gene_id AS ensembl_id, 
                 string_split(UPPER(COALESCE(csv_data.alias_symbol, '')), '|') as alias_symbol, 
