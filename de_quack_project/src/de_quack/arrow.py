@@ -7,7 +7,7 @@ from importlib import resources
 
 import duckdb
 import polars as pl
-
+import polars.selectors as cs
 from .core import de_quackling
 from .exceptions import DeQuackError, ProcessingError
 from .utilities import DE_ARROW_QUERIES, DE_ARROWS_QUERIES, ExperimentMetadata, gene_columns, gene_mapping
@@ -27,6 +27,16 @@ _gene_columns = ['gene_symbol', 'ensembl_id', 'log2fc', 'logCPM', 'pvalue', 'pad
 def get_unique_conn():
     unique_id = uuid.uuid4().hex[:8]
     return f':memory:de_quack_{unique_id}'
+
+def _clean_df(df):
+    df = df.with_columns(pl.col('gene_symbol').fill_null(pl.lit('')).alias('gene_symbol'),
+                        pl.col('ensembl_id').fill_null(pl.lit('')).alias('ensembl_id'),
+                        pl.col('log2fc').fill_null(pl.lit(0.0)).alias('log2fc'),
+                        pl.col('pvalue').fill_null(pl.lit(1.0)).alias('pvalue'),
+                        pl.col('logCPM').fill_null(pl.lit(0.0)).alias('logCPM'),
+                        pl.col('other_info').fill_null(pl.lit('{}')).alias('other_info'),
+                        pl.col('padj').fill_null(pl.lit(1.0)).alias('padj'))
+    return df
 
 
 def _to_polars_table(table):
@@ -222,7 +232,8 @@ class de_arrow:
                 species = 'human'
             df = _heal_genes(df, species)
         df = df.insert_column(0, pl.lit(experiment_id).alias('experiment_id'))
-        return df, metadata_fields
+       
+        return _clean_df(df), metadata_fields
 
 
    
@@ -351,26 +362,70 @@ class de_arrow:
         return self._from_arrow(df, self.experiment_metadata, self.id)
         
 
-    def add_experiment(self, data, metadata=None, id=None):
-        frame = _to_polars_table(data)
-        incoming_ids = _ids_from_frame(frame)
+    def add_experiment(self, data, metadata = None, id=None):
+        if isinstance(data, de_arrow):
+            df, meta, new_ids = self.add_experiment_arrow(data, id)
+        elif isinstance(data, de_arrows):
+            df, meta, new_ids = self._add_experiment_arrows(data, id)
+        else:
+            df, meta, new_ids = self._add_experiment_data(data, metadata, id)
+        return self._from_arrow(df, meta, new_ids)
+    
+    def add_experiment_arrow(self, data, id=None):
+        df = self._table
+        meta = self.experiment_metadata
+        frame = data._table
+        if id is not None:
+            frame = frame.with_columns(pl.lit(id).alias('experiment_id'))
+        df.extend(frame)
+        id = id or data.id
+        new_metadata = {id: data.experiment_metadata[data.id]}
+        new_ids = [self.id, id]
+        meta.update(new_metadata)
+        return (df, meta, new_ids)
 
+    def _add_experiment_arrows(self, data, id=None):
+        df = self._table
+        meta = self.experiment_metadata
+        frame = data._table
         if id is not None:
             if isinstance(id, list):
-                if incoming_ids and len(id) == len(incoming_ids):
-                    mapping = dict(zip(incoming_ids, id))
-                    frame = frame.with_columns(pl.col('experiment_id').replace(mapping).alias('experiment_id')) if 'experiment_id' in frame.columns else frame.with_columns(pl.lit(id[0]).alias('experiment_id'))
-                elif len(id) == 1:
-                    frame = frame.with_columns(pl.lit(id[0]).alias('experiment_id'))
-                else:
-                    raise DeQuackError('Length of id list does not match incoming data')
-            else:
-                frame = frame.with_columns(pl.lit(id).alias('experiment_id'))
+                if len(id) != len(data.id):
+                    raise DeQuackError('Number of provided ids does not match number of existing ids')
+                id_dict = dict(zip(data.id, id))
+                frame = frame.with_columns(pl.col('experiment_id').replace(id_dict).alias('experiment_id'))
+                new_metadata = {n: value for n, value in zip(id, [data.experiment_metadata.values()])}
+        new_metadata = data.experiment_metadata
+        df = df.extend(frame)
+        id = id or data.id
+        new_ids = [self.id] + id
+        meta.update(new_metadata)
+        return (df, meta, new_ids)
 
-        combined = pl.concat([self._frame, frame], how='vertical_relaxed')
-        metadata = metadata or self.experiment_metadata
-        ids = _ids_from_frame(combined)
-        return _wrap_frame(combined, metadata=metadata, ids=ids)
+    def _add_experiment_data(self, data, metadata, id):
+        df = self._table
+        meta = self.experiment_metadata
+        frame = _to_polars_table(data)
+        frame = _order_columns(frame)
+        if id is None:
+            raise DeQuackError('id must be provided when adding a non-de_arrow table')
+        if not isinstance(id, int):
+            raise DeQuackError('id must be an integer when adding a non-de_arrow table')
+        if metadata is None:
+            raise DeQuackError('metadata must be provided when adding a non-de_arrow table')
+        if not isinstance(metadata, dict):
+            raise DeQuackError('metadata must be a dictionary when adding a non-de_arrow table')
+        frame = frame.insert_column(0, pl.lit(id).alias('experiment_id'))
+        metadata_fields, extra_info=ExperimentMetadata().to_dict(metadata, data)
+        for key, value in json.loads(extra_info).items():
+            metadata_fields[key]=value
+        new_metadata = {id: metadata_fields}
+        frame = frame.with_columns(cs.numeric().fill_null(0), cs.string().fill_null(''), cs.struct().fill_null({}))
+        df.extend(frame)
+        new_ids = [self.id, id]
+        meta.update(new_metadata)
+        return (df, meta, new_ids)
+
 
     def insert(self, file):
         required_columns = {'padj', 'pvalue', 'log2fc', 'gene_symbol', 'ensembl_id', 'logCPM', 'stat', 'other_info', 'experiment_id'}
@@ -378,25 +433,7 @@ class de_arrow:
         if not isinstance(file, str):
             raise TypeError(f'file must be a string, not {type(file)}')
 
-        de = de_quackling(file).connect()
-        try:
-            for exp_id in _ids_from_frame(self._frame):
-                subset = self._frame.filter(pl.col('experiment_id') == exp_id)
-                meta = self.experiment_metadata.get(exp_id, {}) if isinstance(self.experiment_metadata, dict) else {}
-                metadata_fields, extra_info = ExperimentMetadata().to_dict(dict(meta), subset)
-                data_signature = __import__('hashlib').md5(str(subset.head(100).to_dicts()).encode()).hexdigest()
-                new_id = de._create_experiment(metadata_fields, data_signature, extra_info)
-                de.conn.register('arrow', subset)
-                de.conn.sql(
-                    'INSERT INTO gene_results (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info) '
-                    'SELECT * REPLACE($id AS experiment_id) FROM arrow',
-                    params={'id': new_id}
-                )
-            de.conn.commit()
-            return self
-        finally:
-            de.conn.close()
-
+       
     def df(self):
         return self._frame.clone()
 
@@ -541,8 +578,9 @@ class de_arrows:
                 flat.append(id)
         _check_ids(flat)
         metadata_fields = _to_metadata(metadata, flat, final_args)
-        return table, metadata_fields, flat
-    
+        table = table.with_columns(cs.numeric().fill_null(0), cs.string().fill_null(''), cs.struct().fill_null({}))
+        return _clean_df(table), metadata_fields, flat
+
     @classmethod
     def _from_arrow(cls, table, metadata, ids, columns = None):
         instance = object.__new__(cls)
