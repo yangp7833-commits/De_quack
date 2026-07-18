@@ -3,6 +3,7 @@
 *.duckdb
 data.txt
 new_data_csv
+test.py
 
 # --- Python Junk ---
 # Ignore Python's automatic background calculation folders
@@ -10,6 +11,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.txt
 .pytest_cache/
 .egg-info/
 dist/

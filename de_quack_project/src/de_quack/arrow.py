@@ -220,11 +220,7 @@ class de_arrow:
         if heal_genes == True:
             if species is None:
                 species = 'human'
-            start_time = time.perf_counter()
             df = _heal_genes(df, species)
-            end_time = time.perf_counter()
-            elapsed_time = end_time - start_time
-            print(f"Healing genes took {elapsed_time:.2f} seconds.")
         df = df.insert_column(0, pl.lit(experiment_id).alias('experiment_id'))
         return df, metadata_fields
 
@@ -307,7 +303,6 @@ class de_arrow:
     def get_significant_genes(self, log2fc=1, pvalue=0.05, logCPM=0):
         required_columns = {'log2fc', 'pvalue', 'logCPM'}
         _check_columns(required_columns, self.columns)
-        print(self._table)
         df = self._table.filter(
             (pl.col('log2fc').abs() >= log2fc) &
             (pl.col('pvalue') <= pvalue) &
@@ -552,7 +547,6 @@ class de_arrows:
     def _from_arrow(cls, table, metadata, ids, columns = None):
         instance = object.__new__(cls)
         instance._table = table
-        instance.columns = _get_array_columns(table)
         instance.experiment_metadata = metadata
         instance.id = ids
         instance.name = _get_experiment_attribute(metadata, 'experiment_name', ids)
@@ -561,18 +555,14 @@ class de_arrows:
         instance.file = _get_experiment_attribute(metadata, 'file', ids)
         instance.date = _get_experiment_attribute(metadata, 'date', ids)
         instance.model = _get_experiment_attribute(metadata, 'model', ids)
-        if columns is not None:
-            instance.columns = columns
-        else:
-            instance.columns = _get_array_columns(table)
         return instance
 
     def set_id(self, ids):
-        if len(ids) != len(self.id):
-            raise DeQuackError('Number of provided ids does not match number of existing ids')
         if isinstance(ids, dict):
             return self._set_id_dict(ids)
         elif isinstance(ids, list):
+            if len(ids) != len(self.id):
+                raise DeQuackError('Number of provided ids does not match number of existing ids')
             return self._set_id_list(ids)
         raise DeQuackError(f'set_ids expected a dictionary or list, not {type(ids)}')
     
@@ -581,37 +571,34 @@ class de_arrows:
         for old_id, new_id in ids.items():
             if old_id not in self.id:
                 raise DeQuackError(f'{old_id} is not in existing ids. Existing ids are {self.id}')
-        _check_ids(list(ids.values()))
+        _check_ids(list(ids.values()) + self.id)
         df = df.with_columns(pl.col('experiment_id').replace(ids).alias('experiment_id'))
+        new_ids = list(ids.values()) + [i for i in self.id if i not in ids.keys()]
         metadata = {new_id: self.experiment_metadata.get(old_id, {}) for old_id, new_id in ids.items()}
-        return self._from_arrow(df, metadata, ids=list(ids.values()))
+        for id in new_ids:
+            if id not in metadata.keys():
+                metadata[id] = self.experiment_metadata.get(id, {})
+
+        return self._from_arrow(df, metadata, ids = new_ids)
 
     def _set_id_list(self, ids):
-        current_ids = _ids_from_frame(self._table)
-        if len(ids) != len(current_ids):
+        if len(ids) != len(self.id):
             raise DeQuackError('Number of provided ids does not match number of existing ids')
         _check_ids(ids)
-        mapping = dict(zip(current_ids, ids))
+        mapping = dict(zip(self.id, ids))
         df = self._table.with_columns(pl.col('experiment_id').replace(mapping).alias('experiment_id'))
         metadata = {new_id: self.experiment_metadata.get(old_id, {}) for old_id, new_id in mapping.items()}
         return self._from_arrow(df, metadata, ids=ids)
     
     def get_experiment(self, id=None, name=None, model=None, annotation_version=None, normalization=None, date=None, contrast=None, file=None):
-        ids = self.id
-        if not ids:
-            return self._wrap(self._table)
 
-        selected_ids = set(ids)
+        selected_ids = set(self.id)
         if id is not None:
             if isinstance(id, list):
-                selected_ids = {item for item in ids if item in id}
+                selected_ids = {item for item in self.id if item in id}
             else:
-                selected_ids = {item for item in ids if item == id}
+                selected_ids = {item for item in self.id if item == id}
 
-        metadata = self.experiment_metadata or {}
-        if any(value is not None for value in [name, model, annotation_version, normalization, date, contrast, file]):
-            if not metadata:
-                raise ProcessingError('Experiment metadata is not available for this frame')
 
             def matches(meta):
                 def text_match(field_value, expected):
@@ -634,7 +621,7 @@ class de_arrows:
                     (date is None or str(meta.get('date')) == str(date))
                 )
 
-            selected_ids = {item for item in selected_ids if matches(metadata.get(item, {}))}
+            selected_ids = {item for item in selected_ids if matches(self.experiment_metadata.get(item, {}))}
 
         if not selected_ids:
             raise DeQuackError('No experiments found with the provided metadata')
@@ -648,8 +635,38 @@ class de_arrows:
         for id in df_ids:
             metadata[id] = self.experiment_metadata.get(id, {})
         if len(df_ids) < 2:
-            return de_arrow.from_arrow(df, metadata, df_ids[0])
+            return de_arrow._from_arrow(df, metadata, df_ids[0])
         return self._from_arrow(df, metadata, df_ids)
+    
+    def get_significant_genes(self, log2fc=1, pvalue=0.05, logCPM=0):
+        required_columns = {'log2fc', 'pvalue', 'logCPM'}
+        _check_columns(required_columns, self.columns)
+        df = self._table.filter(
+            (pl.col('log2fc').abs() >= log2fc) &
+            (pl.col('pvalue') <= pvalue) &
+            (pl.col('logCPM') >= logCPM)
+        )
+        return self._finalize_table(df)
+
+    def get_downregulated(self, log2fc=0, pvalue=0.05, logCPM=0):
+        required_columns = {'log2fc', 'pvalue', 'logCPM'}
+        _check_columns(required_columns, self.columns)
+        df = self._table.filter(
+            (pl.col('log2fc') <= log2fc) &
+            (pl.col('pvalue') <= pvalue) &
+            (pl.col('logCPM') >= logCPM)
+        )
+        return self._finalize_table(df)
+
+    def get_upregulated(self, log2fc=0, pvalue=0.05, logCPM=0):
+        required_columns = {'log2fc', 'pvalue', 'logCPM'}
+        _check_columns(required_columns, self.columns)
+        df = self._table.filter(
+            (pl.col('log2fc') >= log2fc) &
+            (pl.col('pvalue') <= pvalue) &
+            (pl.col('logCPM') >= logCPM)
+        )
+        return self._finalize_table(df)
     
 
 

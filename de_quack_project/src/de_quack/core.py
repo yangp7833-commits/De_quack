@@ -376,35 +376,14 @@ class de_quackling:
         `gene_results` with canonical symbol/Ensembl mapping.
         """
 
-        start_time = time.perf_counter()
         metadata_fields, other_info = ExperimentMetadata().to_dict(metadata, info)
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        print(f"Time taken to validate metadata: {elapsed_time:.4f} seconds")
-        
-        start_time = time.perf_counter()
         self._preprocess(info) 
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        print(f"Time taken to preprocess data: {elapsed_time:.4f} seconds")
 
-        start_time = time.perf_counter()
         data_signature = self._get_data_signature()
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        print(f"Time taken to get data signature: {elapsed_time:.4f} seconds")
 
-        start_time = time.perf_counter()
         id = self._create_experiment(metadata_fields, data_signature, other_info)
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        print(f"Time taken to create experiment: {elapsed_time:.4f} seconds")
 
-        start_time = time.perf_counter()
         view=self._create_temp_view()
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        print(f"Time taken to create temporary view: {elapsed_time:.4f} seconds")
 
         self._insert_gene_results(id, view, species)
         
@@ -414,17 +393,11 @@ class de_quackling:
             date = datetime.datetime.strptime(date, '%Y-%m-%d').date() if date else None
         except ValueError:
             raise ProcessingError(f"Invalid date format: {date}. Expected format is YYYY-MM-DD.")
-        start_time = time.perf_counter()
         rel = self.conn.execute(core_queries['get_experiment'], [id, date, model, file, name, contrast, annotation_version, normalization]).fetchall()
         metadata_list = [dict(zip(experiment_columns, row)) for row in rel]
         metadata_fields, ids = _to_metadata(metadata_list)
-        end_time = time.perf_counter()
-        print(f"Time taken to fetch experiment metadata: {end_time - start_time:.4f} seconds")
-        start_time = time.perf_counter()
         self.conn.execute(f'CREATE OR REPLACE TEMP TABLE ids AS SELECT UNNEST({ids}) AS id')
         df = self.conn.execute('SELECT * exclude(ids.id) FROM gene_results g JOIN ids ON g.experiment_id = ids.id').pl()
-        end_time = time.perf_counter()
-        print(f"Time taken to fetch gene results: {end_time - start_time:.4f} seconds")
         return _get_de_arrows(df, metadata_fields, ids)
         
     
@@ -433,10 +406,7 @@ class de_quackling:
         return self._polars_to_de_arrows(self.conn, df)
 
     def get_upregulated(self, log2fc = 1, padj = 0.05, logCPM = 1, id = None):
-        start_time = time.perf_counter()
         df = self.conn.execute('SELECT * FROM gene_results WHERE log2fc > $1 AND padj < $2 AND logCPM > $3 AND experiment_id = $4 OR $4 IS NULL', [log2fc, padj, logCPM, id]).pl()
-        end_time = time.perf_counter()
-        print(f"Time taken to execute query for upregulated genes: {end_time - start_time:.4f} seconds")
         arrow = self._polars_to_de_arrows(df)
         return arrow
         
