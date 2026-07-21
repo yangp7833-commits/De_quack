@@ -426,22 +426,11 @@ class de_quackling:
             raise ProcessingError(f"Invalid date format: {date}. Expected format is YYYY-MM-DD.")
         try:
             self.conn.begin()
-            ids = self.conn.sql(core_queries['find_delete_experiment'], params = {
-                'id': id,
-                'name': name,
-                'model': model,
-                'annotation_version': annotation_version,
-                'normalization': normalization,
-                'date': date,
-                'contrast': contrast,
-                'file': file
-            }).fetchall()
+            ids = self.conn.execute(core_queries['find_delete_experiment'], (id, date, model, file, name, contrast, annotation_version, normalization)).fetchall()
             ids = [row[0] for row in ids]
-            self.conn.sql(core_queries['delete_gene_results'], params = {
-                'ids': ids})
+            self.conn.execute(core_queries['delete_gene_results'], (ids,))
             self.conn.commit()
-            self.conn.sql(core_queries['delete_experiment'], params = {
-                'ids': ids})
+            self.conn.execute(core_queries['delete_experiment'], (ids,))
         finally:
             self.conn.commit()
     

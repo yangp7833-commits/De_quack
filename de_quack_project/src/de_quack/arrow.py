@@ -364,14 +364,16 @@ class de_arrow:
         return self._from_arrow(df, self.experiment_metadata, self.id)
         
 
-    def add_experiment(self, data, metadata = None, id=None):
+    def add_experiment(self, data, metadata = None, id=None, **fields):
+        if metadata is None and fields:
+            metadata = fields 
         if isinstance(data, de_arrow):
             df, meta, new_ids = self.add_experiment_arrow(data, id)
         elif isinstance(data, de_arrows):
             df, meta, new_ids = self._add_experiment_arrows(data, id)
         else:
             df, meta, new_ids = self._add_experiment_data(data, metadata, id)
-        return self._from_arrow(df, meta, new_ids)
+        return de_arrows._from_arrow(df, meta, new_ids)
     
     def add_experiment_arrow(self, data, id=None):
         df = self._table
@@ -442,8 +444,11 @@ class de_arrow:
         pl.col("gene_symbol").replace("", None),
         pl.col("ensembl_id").replace("", None)
         )        
-        metadata = self.experiment_metadata[self.id]
-        metadata_fields, extra_info=ExperimentMetadata().to_dict(metadata, file)
+        metadata_fields = self.experiment_metadata[self.id]
+        extra_info = {}
+        for key in metadata_fields.keys():
+            if key not in ['model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization']:
+                extra_info[key] = metadata_fields.pop(key)
         db = de_quackling(file).connect()
         if intialize_gene_table == True:
             if species is None:
@@ -733,6 +738,45 @@ class de_arrows:
             (pl.col('logCPM') >= logCPM)
         )
         return self._finalize_table(df)
+    
+    def insert(self, file, intialize_gene_table = False, species = None):
+        required_columns = {'padj', 'pvalue', 'log2fc', 'gene_symbol', 'ensembl_id', 'logCPM', 'stat', 'other_info', 'experiment_id'}
+        _check_columns(required_columns, self.columns)
+        if not isinstance(file, str):
+            raise TypeError(f'file must be a string, not {type(file)}')
+        if not os.path.exists(os.path.abspath(file)):
+            raise FileNotFoundError(f'File not found: {file}')
+        file = os.path.abspath(file)
+        df = self._table
+        df = df.with_columns(
+        pl.col("gene_symbol").replace("", None),
+        pl.col("ensembl_id").replace("", None)
+        )
+        db = de_quackling(file).connect()
+        old_ids = self.id
+        new_ids = []
+        for id in old_ids:        
+            metadata_fields = self.experiment_metadata[id]
+            extra_info = {}
+            for key in metadata_fields.keys():
+                if key not in ['model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization']:
+                    extra_info[key] = metadata_fields.pop(key)
+            sample_data = db.conn.execute('SELECT * FROM (SELECT * FROM df LIMIT 100)').fetchall()
+            data_signature = hashlib.md5(str(sample_data).encode()).hexdigest()
+            result = db.conn.execute(
+                "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
+                (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), extra_info, data_signature)
+            ).fetchall()
+            new_ids.append(result[0][0])
+        id_map = pl.DataFrame({'old_id': old_ids, 'new_id': new_ids}, schema = {'old_id': pl.Int32(), 'new_id': pl.Int32()})
+        if intialize_gene_table == True:
+            if species is None:
+                species = 'human'
+                try:
+                    db.intialize_gene_table(species)
+                except DuplicateGeneTableError:
+                    pass
+        db.conn.execute(_core_queries['insert_de_arrows'], (species,))
     
 
 

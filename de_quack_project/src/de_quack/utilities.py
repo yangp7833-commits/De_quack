@@ -265,24 +265,24 @@ CORE_QUERIES = {
     'find_delete_experiment': '''
                         SELECT experiment_id FROM experimental_data
                         WHERE
-                            ($id IS NULL OR experiment_id = $id) AND
-                            ($date IS NULL OR date = $date) AND
-                            ($model IS NULL OR model LIKE '%' || $model || '%') AND
-                            ($file IS NULL OR file LIKE '%' || $file || '%') AND
-                            ($name IS NULL OR experiment_name LIKE '%' || $name || '%') AND
-                            ($contrast IS NULL OR contrast LIKE '%' || $contrast || '%') AND
-                            ($annotation_version IS NULL OR annotation_version LIKE '%' || $annotation_version || '%') AND
-                            ($normalization IS NULL OR normalization LIKE '%' || $normalization || '%')
+                            ($1 IS NULL OR experiment_id = $1) AND
+                            ($2 IS NULL OR date = $2) AND
+                            ($3 IS NULL OR model LIKE '%' || $3 || '%') AND
+                            ($4 IS NULL OR file LIKE '%' || $4 || '%') AND
+                            ($5 IS NULL OR experiment_name LIKE '%' || $5 || '%') AND
+                            ($6 IS NULL OR contrast LIKE '%' || $6 || '%') AND
+                            ($7 IS NULL OR annotation_version LIKE '%' || $7 || '%') AND
+                            ($8 IS NULL OR normalization LIKE '%' || $8 || '%')
                         ''',
     'delete_experiment': ''' 
                         DELETE FROM experimental_data
                         WHERE 
-                            experiment_id = ANY($ids)
+                            experiment_id = ANY($1)
                         ''',
     'delete_gene_results': '''
                         DELETE FROM gene_results
                         WHERE 
-                            experiment_id = ANY($ids)
+                            experiment_id = ANY($1)
                         ''',
     'insert_de_arrow': '''INSERT INTO gene_results 
                             (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info) 
@@ -306,6 +306,31 @@ CORE_QUERIES = {
                                         list_contains(g.alias_symbol, df.gene_symbol))
                                     WHERE
                                      $2 IS NULL OR g.species = $2 OR sym.species = $2
+                                    ''',
+    'insert_de_arrows': '''INSERT INTO gene_results
+                            (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info) 
+                                SELECT  ids.new_id AS experiment_id, 
+                                        COALESCE(g.symbol, sym.symbol, df.gene_symbol) AS gene_symbol,
+                                        COALESCE(g.ensembl_id, sym.ensembl_id, df.ensembl_id) AS ensembl_id,
+                                        log2fc, 
+                                        logCPM, 
+                                        pvalue, 
+                                        padj, 
+                                        stat, 
+                                        other_info 
+                                    FROM df 
+                                    LEFT JOIN genes g ON
+                                        g.ensembl_id = df.ensembl_id 
+                                    LEFT JOIN genes sym ON
+                                        g.symbol = df.gene_symbol OR
+                                        (g.prev_symbol IS NOT NULL AND df.gene_symbol IS NOT NULL AND
+                                        list_contains(g.prev_symbol, df.gene_symbol)) OR
+                                        (g.alias_symbol IS NOT NULL AND df.gene_symbol IS NOT NULL AND
+                                        list_contains(g.alias_symbol, df.gene_symbol))
+                                    LEFT JOIN id_map ids ON
+                                        ids.old_id = df.experiment_id
+                                    WHERE
+                                     $1 IS NULL OR g.species = $1 OR sym.species = $1
                                     '''
     }
 
