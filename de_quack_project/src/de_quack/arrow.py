@@ -4,17 +4,18 @@ import re
 import time
 import uuid
 from importlib import resources
-
+import hashlib
 import duckdb
 import polars as pl
 import polars.selectors as cs
 from .core import de_quackling
-from .exceptions import DeQuackError, ProcessingError
-from .utilities import DE_ARROW_QUERIES, DE_ARROWS_QUERIES, ExperimentMetadata, gene_columns, gene_mapping
+from .exceptions import DeQuackError, ProcessingError, DuplicateGeneTableError
+from .utilities import DE_ARROW_QUERIES, DE_ARROWS_QUERIES, ExperimentMetadata, gene_columns, gene_mapping, CORE_QUERIES
 
 
 _de_arrow_queries = DE_ARROW_QUERIES
 _de_arrows_queries = DE_ARROWS_QUERIES
+_core_queries = CORE_QUERIES
 _gene_mapping_queries = gene_mapping
 _GENE_ALIAS_TO_COLUMN = {
     alias.lower(): canonical
@@ -344,7 +345,8 @@ class de_arrow:
     def set_id(self, id):
         if isinstance(id, int):
             frame = self._table.with_columns(pl.lit(id).alias('experiment_id'))
-            return self._from_arrow(frame, self.experiment_metadata, id)
+            metadata = {id: self.experiment_metadata[self.id]}
+            return self._from_arrow(frame, metadata, id)
         raise DeQuackError(f'set_ids expected an integer, not {type(id)}')
 
 
@@ -427,13 +429,39 @@ class de_arrow:
         return (df, meta, new_ids)
 
 
-    def insert(self, file):
+    def insert(self, file, intialize_gene_table = False, species = None):
         required_columns = {'padj', 'pvalue', 'log2fc', 'gene_symbol', 'ensembl_id', 'logCPM', 'stat', 'other_info', 'experiment_id'}
         _check_columns(required_columns, self.columns)
         if not isinstance(file, str):
             raise TypeError(f'file must be a string, not {type(file)}')
+        if not os.path.exists(os.path.abspath(file)):
+            raise FileNotFoundError(f'File not found: {file}')
+        file = os.path.abspath(file)
+        df = self._table.select(pl.all().exclude(['experiment_id']))
+        df = df.with_columns(
+        pl.col("gene_symbol").replace("", None),
+        pl.col("ensembl_id").replace("", None)
+        )        
+        metadata = self.experiment_metadata[self.id]
+        metadata_fields, extra_info=ExperimentMetadata().to_dict(metadata, file)
+        db = de_quackling(file).connect()
+        if intialize_gene_table == True:
+            if species is None:
+                species = 'human'
+                try:
+                    db.intialize_gene_table(species)
+                except DuplicateGeneTableError:
+                    pass
+        sample_data = db.conn.execute('SELECT * FROM (SELECT * FROM df LIMIT 100)').fetchall()
+        data_signature = hashlib.md5(str(sample_data).encode()).hexdigest()
+        result = db.conn.execute(
+            "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
+            (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), extra_info, data_signature)
+        ).fetchall()
+        db.conn.execute(_core_queries['insert_de_arrow'], (result[0][0], species))
+        
 
-       
+        
     def df(self):
         return self._frame.clone()
 

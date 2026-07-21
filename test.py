@@ -18,11 +18,11 @@ def make_data(total):
             f.write(f'ENSG{n},2.5,0.01,5.0\n')
 start_time = time.perf_counter()
 arrow = de_arrow('data1.txt', experiment_name='new_data_csv').get_gene(ensembl_id = 'ENSG00000000001').set_id(3)
-arrows = de_arrows('new_data_csv', arrow, metadata = {}).set_id([5, 6])
-arrow = arrow.add_experiment('new_data_csv', id = 10, metadata = {'experiment_name': 'new_data_csv'})
-print(arrow.id)
 print(arrow.experiment_metadata)
-print(arrow)
+with de_quackling('SQL.duckdb') as db:
+    arrow.insert('SQL.duckdb')
+    df = db.get_gene()
+    print(df)
 
 
 

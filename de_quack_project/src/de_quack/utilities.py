@@ -283,7 +283,30 @@ CORE_QUERIES = {
                         DELETE FROM gene_results
                         WHERE 
                             experiment_id = ANY($ids)
-                        '''
+                        ''',
+    'insert_de_arrow': '''INSERT INTO gene_results 
+                            (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info) 
+                            SELECT $1 AS experiment_id, 
+                                        COALESCE(g.symbol, sym.symbol, df.gene_symbol) AS gene_symbol,
+                                        COALESCE(g.ensembl_id, sym.ensembl_id, df.ensembl_id) AS ensembl_id,
+                                        log2fc, 
+                                        logCPM, 
+                                        pvalue, 
+                                        padj, 
+                                        stat, 
+                                        other_info 
+                                    FROM df 
+                                    LEFT JOIN genes g ON
+                                        g.ensembl_id = df.ensembl_id 
+                                    LEFT JOIN genes sym ON
+                                        g.symbol = df.gene_symbol OR
+                                        (g.prev_symbol IS NOT NULL AND df.gene_symbol IS NOT NULL AND
+                                        list_contains(g.prev_symbol, df.gene_symbol)) OR
+                                        (g.alias_symbol IS NOT NULL AND df.gene_symbol IS NOT NULL AND
+                                        list_contains(g.alias_symbol, df.gene_symbol))
+                                    WHERE
+                                     $2 IS NULL OR g.species = $2 OR sym.species = $2
+                                    '''
     }
 
 gene_mapping = {'mouse_genes': '''
