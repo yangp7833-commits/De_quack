@@ -62,8 +62,11 @@ def _to_polars_table(table):
             raise FileNotFoundError(f'File not found: {path}')
         if path.lower().endswith('.parquet'):
             return pl.read_parquet(path)
-        with open(path, 'r', encoding='utf-8') as handle:
-            first_line = handle.readline()
+        try:
+            with open(path, 'r', encoding='utf-8') as handle:
+                first_line = handle.readline()
+        except Exception as e:
+            raise FileNotFoundError(f'Error reading file: {path}') from e
         separator = '\t' if '\t' in first_line else (';' if ';' in first_line else ',')
         return pl.read_csv(path, separator=separator)
 
@@ -138,12 +141,16 @@ def _order_columns(df):
     expressions = []
     if 'experiment_id' in df.columns:
         expressions.append(pl.col('experiment_id'))
+    
 
     for column in _gene_columns:
         if column in df.columns:
             expressions.append(pl.col(column))
         else:
-            expressions.append(pl.lit(None).alias(column))
+            if column == 'logCPM' and 'base_mean' in df.columns:
+                expressions.append(pl.col('base_mean').add(1).log(base = 2).alias('logCPM'))
+            else:
+                expressions.append(pl.lit(None).alias(column))
 
     extra_columns = [column for column in df.columns if column not in _gene_columns and column != 'experiment_id']
     if extra_columns:
@@ -547,7 +554,7 @@ class de_arrows:
             result = attr(*args, **kwargs)
             if isinstance(result, pl.DataFrame):
                 if result.columns == table.columns:
-                    return self.__class__._finalize_table(result, self.experiment_metadata, self.id)
+                    return self.__class__._finalize_table(self, result)
             
             return result
 
@@ -705,7 +712,9 @@ class de_arrows:
         metadata = {}
         for id in df_ids:
             metadata[id] = self.experiment_metadata.get(id, {})
-        if len(df_ids) < 2:
+        if len(df_ids) == 0:
+            return de_arrow._from_arrow(df, metadata, None)
+        if len(df_ids) == 1:
             return de_arrow._from_arrow(df, metadata, df_ids[0])
         return self._from_arrow(df, metadata, df_ids)
     

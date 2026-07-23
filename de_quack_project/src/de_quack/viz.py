@@ -4,35 +4,26 @@ import numpy as np
 import re
 import os
 from .exceptions import ProcessingError
-from .arrow import de_arrow, de_arrows, get_unique_conn
+from .arrow import de_arrow, de_arrows, _to_polars_table
 from .core import de_quackling
+import polars as pl
 from .utilities import DE_ARROW_QUERIES
 
 
 _de_queries = DE_ARROW_QUERIES
 
-def volcano_plot(data, padj = 0.05, log2fc = 1, title=None, label_genes = 0, label_color = 'black', upregulated_color = 'red', downregulated_color = 'blue', insignificant_color = 'grey', label_size = 10, label_font = 'Arial', label_rotation = 0, label_fontweight = 'bold', file = None, label_name='ensembl_id', show=False):
-    de = de_quackling(get_unique_conn()).connect()
-    de._preprocess(data)
-    de_arrow_insertion_view = de._create_temp_view()
-    arrow_table = de.conn.sql(_de_queries['insert_to_de_arrow'], params = {'id': 0})
-
-    
-    upregulated = de.conn.sql('SELECT * FROM arrow_table WHERE log2fc > $log2fc AND padj < $padj AND padj != 0', params = {'padj': padj, 'log2fc': log2fc})
-    insignificant = de.conn.sql('SELECT * FROM arrow_table WHERE abs(log2fc) < abs($log2fc) AND padj IS NOT NULL AND $padj != 0 OR padj > $padj AND padj != 0', params = {'padj': padj, 'log2fc': log2fc})
-    downregulated = de.conn.sql('SELECT * FROM arrow_table WHERE log2fc < $log2fc AND padj < $padj AND padj != 0', params = {'padj': padj, 'log2fc': -1 * log2fc})
-
-    log2fc_plot = [t[0] for t in upregulated.select('log2fc').fetchall()]
-    padj_plot = [t[0] for t in upregulated.select('padj').fetchall()]
-    plt.scatter(log2fc_plot, -np.log10(padj_plot), color=upregulated_color, alpha=0.5, label='Upregulated')
-    log2fc_plot = [t[0] for t in downregulated.select('log2fc').fetchall()]
-    padj_plot = [t[0] for t in downregulated.select('padj').fetchall()]
-    plt.scatter(log2fc_plot, -np.log10(padj_plot), color=downregulated_color, alpha=0.5, label='Downregulated')
-    log2fc_plot = [t[0] for t in insignificant.select('log2fc').fetchall()]
-    padj_plot = [t[0] for t in insignificant.select('padj').fetchall()]
-    plt.scatter(log2fc_plot, -np.log10(padj_plot), color=insignificant_color, alpha=0.5, label='Insignificant')
-    plt.axhline(-np.log10(padj), color='black', linestyle='--', linewidth=1)
-    plt.axvline(log2fc, color='black', linestyle='--', linewidth=1)
+def volcano_plot(df, padj = 0.05, log2fc = 1, title=None, label_genes = 0, label_color = 'black', upregulated_color = 'red', downregulated_color = 'blue', insignificant_color = 'grey', label_size = 10, label_font = 'Courier New', label_rotation = 0, label_fontweight = 'bold', file = None, label_type = 'ensembl_id', show=False):
+    if not isinstance(df, (de_arrow, de_arrows)):
+        df = _to_polars_table(df)
+        df = _order_columns(df)
+    df = df.filter(pl.col('log2fc').is_not_null() & pl.col('padj').is_not_null())
+    df = df.filter(pl.col('padj') > 0)
+    upregulated_df = df.filter((pl.col('padj') < padj) & (pl.col('log2fc') > log2fc))
+    downregulated_df = df.filter((pl.col('padj') < padj) & (pl.col('log2fc') < -log2fc))
+    insignificant_df = df.filter((pl.col('padj') >= padj) | ((pl.col('log2fc') >= -log2fc) & (pl.col('log2fc') <= log2fc)))
+    plt.scatter(upregulated_df['log2fc'], -upregulated_df['padj'].log10(), color=upregulated_color, label='Upregulated', alpha=0.7)
+    plt.scatter(downregulated_df['log2fc'], -downregulated_df['padj'].log10(), color=downregulated_color, label='Downregulated', alpha=0.7)
+    plt.scatter(insignificant_df['log2fc'], -insignificant_df['padj'].log10(), color=insignificant_color, label='Insignificant', alpha=0.7)
 
     plt.xlabel('Log2FC')
     plt.ylabel('-Log10(Padj)')
@@ -40,13 +31,19 @@ def volcano_plot(data, padj = 0.05, log2fc = 1, title=None, label_genes = 0, lab
     plt.legend()
 
     if label_genes > 0:
-        if label_name not in upregulated.columns or label_name not in downregulated.columns:
-            raise ProcessingError(f"The label_name '{label_name}' is not present in the data. Please provide a valid column name for labeling genes.")
-        top_regulated = upregulated.select(label_name, 'log2fc', 'padj').order('log2fc DESC').limit(label_genes).fetchall()
-        top_regulated += downregulated.select(label_name, 'log2fc', 'padj').order('log2fc ASC').limit(label_genes).fetchall()
-        for gene, log2fc, padj in top_regulated:
+        
+        if label_type in upregulated_df.columns:
+            label_name = label_type
+        else:
+            raise ValueError(f"Label column '{label_type}' not found in DataFrame columns.")
+
+        top_regulated = upregulated_df.select(pl.col(label_name), pl.col('padj'), pl.col('log2fc').sort(descending=True).limit(label_genes)).to_dicts()
+        top_regulated += downregulated_df.select(pl.col(label_name), pl.col('padj'), pl.col('log2fc').sort(descending=False).limit(label_genes)).to_dicts()
+        for row in top_regulated:
+            gene = row[label_name]
+            log2fc = row['log2fc']
+            padj = row['padj']
             plt.text(log2fc + 0.1, -np.log10(padj) + 0.1, gene, fontsize=label_size, color=label_color, rotation=label_rotation, fontweight=label_fontweight, fontname=label_font)
-            print(log2fc, -np.log10(padj), gene)
        
 
     if file:
