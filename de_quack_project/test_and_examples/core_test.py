@@ -13,7 +13,8 @@ class TestCore():
     def test_queries(self):
         with de_quackling() as db:
             assert db.get_downregulated().height == 15
-            assert db.get_upregulated().height == 75
+            assert db.get_upregulated().height == 22
+            assert db.get_significant_genes().height == 37
             assert db.get_experiment(name = 'Test Experiment').height > 0 
     
     def test_remove(self):
