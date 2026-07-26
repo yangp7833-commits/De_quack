@@ -1,4 +1,4 @@
-from de_quack import de_arrow, de_arrows
+from de_quack import de_arrow, de_arrows, de_quackling
 import pytest
 import os
 
@@ -29,6 +29,7 @@ class TestArrow():
     def test_arrow_add(self):
         arrow = de_arrow('data.txt', metadata = {'experiment_name': 'Test Experiment'}, heal_genes = True)
         arrows = arrow.add_experiment('data1.txt', metadata = {'experiment_name': 'Test Experiment 2'}, id = 3)
+        arrows2 = arrows.add_experiment('data.txt', metadata = {'experiment_name': 'Test Experiment 3'}, id = 4)
         assert arrows._table.height > 0
         assert arrows.get_gene('PTEN').height > 0 and arrows.get_gene(ensembl_id = 'ENSMUSG00000000017').height > 0
         assert arrows.id == [1, 3]
@@ -39,5 +40,17 @@ class TestArrow():
         arrows2 = arrows.set_id({2:7})
         assert arrows1.id == [4, 5]
         assert arrows2.id == [1, 7]
+    
+    def test_arrow_insert(self):
+        arrow = de_arrow('data.txt', metadata = {'experiment_name': 'Test Experiment'}, heal_genes = True)
+        arrows = arrow.add_experiment('data1.txt', metadata = {'experiment_name': 'Test Experiment 2'}, id = 3)
+        with de_quackling() as db:
+            arrows.insert('SQL.duckdb')
+            arrow.insert('SQL.duckdb')
+            assert db.get_gene('AKT1').height > 0
+            assert db.get_upregulated().height > 0
+        
+    def test_arrow_cleanup(self):
+        os.remove('SQL.duckdb')
     
 
