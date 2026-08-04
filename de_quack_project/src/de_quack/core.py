@@ -145,11 +145,18 @@ class de_quackling:
     
         
 
-    def _create_temp_view(self): 
+    def _create_temp_view(self, columns = {}): 
         from duckdb import SQLExpression
 
         temp_view = self.conn.table('preprocessed_data')
         columns_info = [(column_name, _GENE_ALIAS_TO_COLUMN.get(column_name.lower())) for column_name in temp_view.columns]
+        for key, value in columns.items():
+            if key in temp_view.columns and value in gene_columns:
+                if (key, value) not in columns_info:
+                    columns_info.append((key, value))
+            else:
+                raise ProcessingError(f"Invalid column mapping: {key} -> {value}. Ensure the column exists in the data and the value is a valid gene column alias.")
+
 
         if not columns_info:
             raise ProcessingError("The registered table contains no columns.")
@@ -358,13 +365,13 @@ class de_quackling:
 
         self.conn.commit()
         
-    def ingest(self, info, metadata: dict, species = 'human', **config_columns):
+    def ingest(self, info, metadata: dict = {}, species = 'human', columns = {}, **kwargs):
         """Normalize and ingest differential expression results into DuckDB.
 
         Args:
             metadata: A dictionary containing the experiment metadata.
-            **config_columns: additional configuration columns for the ingestion process.
-        
+            config_columns: A dictionary of additional configuration columns for the ingestion process.
+            **kwargs: Additional keyword arguments.
 
             experiment_name: human-readable experiment name.
             date: optional experiment date; auto-detected from file path or current time.
@@ -375,7 +382,8 @@ class de_quackling:
         prevents duplicate experiments, and loads normalized gene results into
         `gene_results` with canonical symbol/Ensembl mapping.
         """
-
+        if kwargs:
+            metadata.update(kwargs)
         metadata_fields, other_info = ExperimentMetadata().to_dict(metadata, info)
         self._preprocess(info) 
 
@@ -383,7 +391,7 @@ class de_quackling:
 
         id = self._create_experiment(metadata_fields, data_signature, other_info)
 
-        view=self._create_temp_view()
+        view=self._create_temp_view(columns)
 
         self._insert_gene_results(id, view, species)
         
@@ -402,11 +410,11 @@ class de_quackling:
         
     
     def get_significant_genes(self, log2fc = 1, padj = 0.05, logCPM = 1, id = None):
-        df = self.conn.execute('SELECT * FROM gene_results WHERE abs(log2fc) > $1 AND padj < $2 AND logCPM > $3 AND experiment_id = $4 OR $4 IS NULL', [log2fc, padj, logCPM, id]).pl()
-        return self._polars_to_de_arrows(self.conn, df)
+        df = self.conn.execute('SELECT * FROM gene_results WHERE abs(log2fc) > $1 AND padj < $2 AND logCPM > $3 AND (experiment_id = $4 OR $4 IS NULL)', [log2fc, padj, logCPM, id]).pl()
+        return self._polars_to_de_arrows(df)
 
     def get_upregulated(self, log2fc = 1, padj = 0.05, logCPM = 1, id = None):
-        df = self.conn.execute('SELECT * FROM gene_results WHERE log2fc > $1 AND padj < $2 AND logCPM > $3 AND experiment_id = $4 OR $4 IS NULL', [log2fc, padj, logCPM, id]).pl()
+        df = self.conn.execute('SELECT * FROM gene_results WHERE log2fc > $1 AND padj < $2 AND logCPM > $3 AND (experiment_id = $4 OR $4 IS NULL)', [log2fc, padj, logCPM, id]).pl()
         arrow = self._polars_to_de_arrows(df)
         return arrow
         
@@ -437,12 +445,7 @@ class de_quackling:
     def _polars_to_de_arrows(self, df):
         if len(df.columns) == 0:
             return self._get_de_arrows(df, {}, [])
-        start_time = time.perf_counter()
         ids = df['experiment_id'].unique().to_list()
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        print(f"Time taken to extract unique experiment IDs: {elapsed_time:.4f} seconds")
-        start_time = time.perf_counter()
         meta_rel = self.conn.execute(
             '''
             SELECT
@@ -460,8 +463,6 @@ class de_quackling:
             ''',
             [ids]
         )
-        end_time = time.perf_counter()
-        print(f"Time taken to fetch metadata: {end_time - start_time:.4f} seconds")
         metadata_list = [dict(zip(experiment_columns, row)) for row in meta_rel.fetchall()]
         metadata_fields, ids = _to_metadata(metadata_list)
         return _get_de_arrows(df, metadata_fields, ids)
@@ -483,14 +484,15 @@ class de_quackling:
             self.conn = None
 
 
-    def execute_raw(self, query, values=None):
-        return self.conn.execute(query, (values,))
+
+    def execute_raw(self, query):
+        return self.conn.execute(query)
     
 def _get_de_arrows(arrows, metadata, ids):
-    from .arrow import de_arrows, de_arrow
+    from .arrow import DeArrow, DeArrows
     if len(ids) < 2:
-        return de_arrow._from_arrow(arrows, metadata, ids)
-    return de_arrows._from_arrow(arrows, metadata, ids)
+        return DeArrow._from_arrow(arrows, metadata, ids)
+    return DeArrows._from_arrow(arrows, metadata, ids)
 
 def _to_metadata(metadata_list):
     for meta in metadata_list:

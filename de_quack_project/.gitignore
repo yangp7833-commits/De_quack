@@ -20,3 +20,7 @@ build/
 # --- Operating System Junk ---
 .DS_Store
 Thumbs.db
+
+# --- Pytest / Testing ---
+.pytest_cache/
+assets
