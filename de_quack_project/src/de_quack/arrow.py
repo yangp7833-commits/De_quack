@@ -9,7 +9,7 @@ import duckdb
 import polars as pl
 import polars.selectors as cs
 from typing import Sequence, TypeAlias
-from .core import de_quackling
+from .core import DeQuackling
 from .exceptions import DeQuackError, ProcessingError, DuplicateGeneTableError
 from .utilities import DE_ARROW_QUERIES, DE_ARROWS_QUERIES, ExperimentMetadata, gene_columns, gene_mapping, CORE_QUERIES
 
@@ -243,8 +243,8 @@ class DeArrow:
         species: str | None = None,
     ) -> tuple[pl.DataFrame, ExperimentMetadataMap]:
         df = _to_polars_table(info)
-        metadata_fields, extra_info=ExperimentMetadata().to_dict(metadata, info)
-        for key, value in json.loads(extra_info).items():
+        metadata_fields, other_info=ExperimentMetadata().to_dict(metadata, info)
+        for key, value in json.loads(other_info).items():
             metadata_fields[key]=value
         metadata_fields={experiment_id: metadata_fields}
         df = _order_columns(df, columns)
@@ -255,7 +255,6 @@ class DeArrow:
         df = df.insert_column(0, pl.lit(experiment_id).alias('experiment_id'))
        
         return _clean_df(df), metadata_fields
-
 
    
 
@@ -430,11 +429,11 @@ class DeArrow:
         pl.col("ensembl_id").replace("", None)
         )        
         metadata_fields = self.experiment_metadata[self.id]
-        extra_info = {}
+        other_info = {}
         for key in metadata_fields.keys():
             if key not in ['model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization']:
-                extra_info[key] = metadata_fields.pop(key)
-        db = de_quackling(file).connect()
+                other_info[key] = metadata_fields.pop(key)
+        db = DeQuackling(file).connect()
         if initialize_gene_table == True:
             species = species or 'human'
             try:
@@ -445,7 +444,7 @@ class DeArrow:
         data_signature = hashlib.md5(str(sample_data).encode()).hexdigest()
         result = db.conn.execute(
             "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
-            (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), extra_info, data_signature)
+            (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, data_signature)
         ).fetchall()
         db.conn.execute(_core_queries['insert_de_arrow'], (result[0][0], species))
         db.conn.commit()
@@ -622,7 +621,10 @@ class DeArrows:
                 arg = _order_columns(arg, columns)
                 arg = arg.insert_column(0, pl.lit(new_id).alias('experiment_id'))
                 flat_ids.append(new_id)
-                meta_by_id[new_id] = next(meta_iter)
+                meta = next(meta_iter)
+                meta, other_info = ExperimentMetadata().to_dict(meta, arg)
+                meta.update(json.loads(other_info))
+                meta_by_id[new_id] = meta
                 try:
                     frames.append(arg)
                 except pl.exceptions.SchemaError as e:
@@ -808,20 +810,20 @@ class DeArrows:
         pl.col("gene_symbol").replace("", None),
         pl.col("ensembl_id").replace("", None)
         )
-        db = de_quackling(file).connect()
+        db = DeQuackling(file).connect()
         old_ids = self.id
         new_ids = []
         for id in old_ids:        
             metadata_fields = self.experiment_metadata[id]
-            extra_info = {}
+            other_info = {}
             for key in metadata_fields.keys():
                 if key not in ['model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization']:
-                    extra_info[key] = metadata_fields.pop(key)
+                    other_info[key] = metadata_fields.pop(key)
             sample_data = df.select(pl.all()).limit(50)
             data_signature = hashlib.md5(str(sample_data).encode()).hexdigest()
             result = db.conn.execute(
                 "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
-                (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), extra_info, data_signature)
+                (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, data_signature)
             ).fetchall()
             new_ids.append(result[0][0])
         id_map = pl.DataFrame({'old_id': old_ids, 'new_id': new_ids}, schema = {'old_id': pl.Int32(), 'new_id': pl.Int32()})

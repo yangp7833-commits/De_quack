@@ -1,4 +1,4 @@
-from de_quack import DeArrow, DeArrows, de_quackling
+from de_quack import DeArrow, DeArrows, DeQuackling
 import pytest
 import os
 
@@ -45,7 +45,7 @@ class TestArrow():
     def test_arrow_insert(self):
         arrow = DeArrow('data.txt', metadata = {'experiment_name': 'Test Experiment'}, heal_genes = True)
         arrows = arrow.add_experiment('data1.txt', metadata = {'experiment_name': 'Test Experiment 2'}, id = 3)
-        with de_quackling() as db:
+        with DeQuackling() as db:
             arrows.insert('SQL.duckdb')
             arrow.insert('SQL.duckdb')
             assert db.get_gene().height > 0

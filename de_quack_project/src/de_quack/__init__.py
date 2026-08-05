@@ -2,13 +2,13 @@
 
 __version__ = "0.1.2"
 
-from .core import de_quackling
+from .core import DeQuackling
 from .viz import volcano_plot
 from .exceptions import DeQuackError, ProcessingError, DuplicateExperimentError, DuplicateGeneTableError
 from .arrow import DeArrow, DeArrows
 
 __all__ = [
-    "de_quackling",
+    "DeQuackling",
     "volcano_plot",
     "DeQuackError",
     "ProcessingError",

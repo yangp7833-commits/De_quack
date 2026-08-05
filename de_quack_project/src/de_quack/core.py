@@ -1,24 +1,18 @@
 """
-de_quackling: Database manager for differential expression analysis data.
+DeQuackling: Database manager for differential expression analysis data.
 
-Small wrapper around a DuckDB file used to store and query experimental and
+A manager for a DuckDB file used to store and query experimental and
 gene result data. Key behaviors:
 
 - Creates and manages tables (`experimental_data`, `gene_results`, `genes`).
 - Provides helper methods to ingest and normalize incoming dataframes.
-- Query and delete helpers accept simple filter kwargs like `pvalue__gt=0.05`.
-- If a filter column doesn't match a real column exactly, a close-match
-    suggestion is raised (via difflib). If there is no close match but the
-    `other_info` JSON column exists, the filter is applied against that JSON
-    using `other_info ->> '<key>'`. Numeric comparisons use `CAST(... AS DOUBLE)`.
+- Provides helper methods to query data by experiment, gene, or significance and returns wrapped DeArrow/DeArrows objects for further analysis.
 
 Workflow summary (high level):
-1. Open connection with `with DBManager() as db:` which creates tables/indexes.
+1. Open connection with `with DeQuackling() as db:` which creates tables/indexes.
 2. Use `ingest()` to normalize and insert a DataFrame (preprocess_df).
-3. `query()` and delete methods accept keyword filters, resolve them to
-     concrete SQL clauses, and execute against DuckDB.
+3. Use helper methods like `get_experiment()`, `get_gene()`, `get_upregulated()`, etc. to query data.
 """
-import nanoarrow as na
 import duckdb
 from duckdb import SQLExpression, CaseExpression, ColumnExpression, ConstantExpression, FunctionExpression
 import re
@@ -27,10 +21,10 @@ import json
 import uuid
 from pathlib import Path
 import hashlib
-import sys
 import difflib
 import datetime
-import pandas as pd
+import polars as pl
+from typing import TypeAlias
 from .exceptions import ProcessingError, DuplicateExperimentError, DuplicateGeneTableError, DeQuackError
 from .utilities import gene_columns, ExperimentMetadata, CORE_QUERIES, gene_mapping
 import time
@@ -38,18 +32,23 @@ _gene_mapping_queries = gene_mapping
 core_queries = CORE_QUERIES
 experiment_columns=['experiment_id', 'model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization', 'extra_info']
 
+ExperimentId: TypeAlias = int | str
+ExperimentMetadataField: TypeAlias = str | int | float | bool | None | dict[str, object] | list[object]
+ExperimentMetadataRecord: TypeAlias = dict[str, ExperimentMetadataField]
+ExperimentMetadataMap: TypeAlias = dict[ExperimentId, ExperimentMetadataRecord]
+
 _GENE_ALIAS_TO_COLUMN = {
     alias.lower(): canonical
     for canonical, aliases in gene_columns.items()
     for alias in aliases + [canonical]
 }
 
-class de_quackling:
-    def __init__(self, db_path='SQL.duckdb'):
-        """Initialize a de_quackling manager for a DuckDB-backed differential expression store.
+class DeQuackling:
+    def __init__(self, db_path: str = 'SQL.duckdb') -> None:
+        """Initialize a DuckDB-backed differential expression store.
 
         Args:
-            db_path: path to the DuckDB file to use or create.
+            db_path: DuckDB database path to open or create.
         """
         self.db_path = db_path
         self.conn = None
@@ -57,12 +56,10 @@ class de_quackling:
         
         
         
-    def __enter__(self):
-        """Open the DuckDB connection and initialize required tables.
+    def __enter__(self) -> "DeQuackling":
+        """Open the DuckDB connection and create the required schema if needed.
 
-        This method is used by the context manager protocol and creates the
-        core schema (`experimental_data`, `gene_results`, `genes`) plus indexes
-        and sequences if they do not already exist.
+        The core tables are `experimental_data`, `gene_results`, and `genes`.
         """
         self.conn = duckdb.connect(self.db_path)
         tables = self.conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='main'").fetchall()
@@ -74,7 +71,8 @@ class de_quackling:
         self.experiment_columns = self.conn.execute("SELECT * FROM information_schema.columns WHERE table_name='experimental_data'").fetchall()
         return self
     
-    def _initialize_tables(self):
+    def _initialize_tables(self) -> None:
+        """Create the core tables, sequence, and indexes used by the database."""
         self.conn.execute('''CREATE SEQUENCE IF NOT EXISTS seq_experiment_id START 1''')
 
         # Create tables if they don't already exist.
@@ -94,8 +92,7 @@ class de_quackling:
                             pvalue DOUBLE,
                             padj DOUBLE,
                             stat DOUBLE,
-                            other_info VARCHAR,
-                            FOREIGN KEY (experiment_id) REFERENCES experimental_data(experiment_id))
+                            other_info VARCHAR)
                             ''')
         
         self.conn.execute('''CREATE TABLE IF NOT EXISTS genes
@@ -118,24 +115,26 @@ class de_quackling:
         # Create indexes
         self.conn.execute('CREATE INDEX IF NOT EXISTS idx_gene_name_lookup ON gene_results(gene_symbol, experiment_id)')
     
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
         """Close the DuckDB connection when leaving the context manager."""
         if self.conn:
             self.conn.close()
 
-    def fast_connect(self):
+    def fast_connect(self) -> "DeQuackling":
+        """Open a connection without initializing the schema."""
         self.conn = duckdb.connect(self.db_path)
         return self
     
-    def connect(self):
-        """Ensure the database connection is open and return the manager instance."""
+    def connect(self) -> "DeQuackling":
+        """Ensure the database connection is open and return the manager."""
         if not self.conn:
             self.__enter__()
         return self
 
 
 
-    def _get_data_signature(self):
+    def _get_data_signature(self) -> str:
+        """Return an md5 signature for the first 100 rows of the preprocessed input."""
         sample_data=self.conn.execute('SELECT * FROM (SELECT * FROM preprocessed_data LIMIT 100)').fetchall()
     
         # Generate a unique string (hash) from that data
@@ -145,7 +144,10 @@ class de_quackling:
     
         
 
-    def _create_temp_view(self, columns = {}): 
+    def _create_temp_view(self, columns: dict[str, str] | None = None) -> duckdb.DuckDBPyRelation:
+        """Create a normalized temporary view from the registered input data."""
+        if columns is None:
+            columns = {}
         from duckdb import SQLExpression
 
         temp_view = self.conn.table('preprocessed_data')
@@ -165,7 +167,7 @@ class de_quackling:
 
         mapped_incoming = []
         all_columns = []
-        columns = []
+        mapped_columns = []
         expressions=[]
 
         for incoming_col, real_col in columns_info:
@@ -176,18 +178,18 @@ class de_quackling:
                 if sample_val is not None and re.match(r'^ENS', str(sample_val)):
                     mapped_incoming.append(incoming_col)
                     expressions.append(ColumnExpression(incoming_col).alias('ensembl_id'))
-                    columns.append('ensembl_id')
+                    mapped_columns.append('ensembl_id')
                 elif not has_gene_symbol:
                     mapped_incoming.append(incoming_col)
                     expressions.append(ColumnExpression(incoming_col).alias('gene_symbol'))
-                    columns.append('gene_symbol')
+                    mapped_columns.append('gene_symbol')
                 else:
                     pass
             elif real_col is not None:
                 if real_col != 'base_mean':
                     mapped_incoming.append(incoming_col)
                 expressions.append(ColumnExpression(incoming_col).alias(real_col))
-                columns.append(real_col)
+                mapped_columns.append(real_col)
 
         if not mapped_incoming:
             raise ProcessingError(
@@ -195,9 +197,9 @@ class de_quackling:
                 'Verify the header names against gene_columns aliases.'
             )
         for col in ['gene_symbol', 'ensembl_id', 'log2fc', 'padj', 'pvalue', 'stat', 'logCPM']:
-            if col not in columns:
+            if col not in mapped_columns:
                 expressions.append(ConstantExpression(None).alias(col))
-                columns.append(col)
+                mapped_columns.append(col)
     
         extra_columns = [col for col in all_columns if col not in mapped_incoming]
         if extra_columns:
@@ -212,13 +214,7 @@ class de_quackling:
         
         
         
-        if 'gene_symbol' not in columns:
-            expressions.append(SQLExpression('NULL').alias('gene_symbol'))
-        if 'ensembl_id' not in columns:
-            expressions.append(SQLExpression('NULL').alias('ensembl_id'))
-        if 'logCPM' not in columns:
-            expressions.append(SQLExpression('NULL').alias('logCPM'))
-        if 'base_mean' not in columns:
+        if 'base_mean' not in mapped_columns:
             expressions.append(SQLExpression('NULL').alias('base_mean'))
 
         if not mapped_incoming:
@@ -232,7 +228,8 @@ class de_quackling:
 
 
 
-    def _preprocess(self, info):
+    def _preprocess(self, info: object) -> None:
+        """Register an input file or table-like object as `preprocessed_data`."""
 
         if isinstance(info, str) and os.path.isfile(os.path.abspath(info)):
             info=os.path.abspath(info)
@@ -248,48 +245,55 @@ class de_quackling:
             raise ProcessingError(f"{os.path.abspath(info)} is not a valid file path.")
         
 
-        class_name = info.__class__.__name__.lower()
         self.conn.execute('DROP VIEW IF EXISTS preprocessed_data')
-
-        if class_name in {'de_arrow', 'de_arrows'}:
+        from .arrow import DeArrow, DeArrows
+        if isinstance(info, DeArrow) or isinstance(info, DeArrows):
             self.conn.register('info', info._table)
+            self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
+            return
+        
+        if isinstance(info, duckdb.DuckDBPyRelation):
+            self.conn.register('info', info)
             self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
             return
 
         try:
-            self.conn.register('info', info)
-        except Exception:
+            import pandas as pd
+            if isinstance(info, pd.DataFrame):
+                self.conn.register('info', info)
+                self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
+                return
+        except ImportError:
             pass
 
-        if class_name == 'dataframe':
-            self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
-            return
+        try:
+            import pyarrow as pa
+            if isinstance(info, pa.Table):
+                self.conn.register('info', info)
+                self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
+                return
+        except ImportError:
+            pass
 
-        if class_name == 'table':
-            self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
-            return
-        
-
-        raise ProcessingError(f'type {type(info)} is not supported. Provide a pandas DataFrame, list of dicts, or path to a CSV/TSV/Parquet file.')
+        raise ProcessingError(f'type {type(info)} is not supported. Provide a pandas DataFrame, DuckDB relation, de_arrow object, or path to a CSV/TSV/Parquet file.')
     
-    def initialize_gene_table(self, species = 'human'):
-        """Initialize the reference gene table for a given species.
+    def initialize_gene_table(self, species: str = 'human') -> None:
+        """Load the reference gene table for `human` or `mouse`.
 
-        Currently supports `human` by downloading HGNC gene metadata and
-        populating the `genes` reference table for symbol and Ensembl matching.
+        `human` loads HGNC data; `mouse` loads MGI data.
         """
         if species.lower() == 'human':
             self._insert_human_genes()
         elif species.lower() == 'mouse':
             self._insert_mouse_genes()
         else:
-            raise ProcessingError(f"Species '{species}' is not supported. Only 'human' is currently supported.")
+            raise ProcessingError(f"Species '{species}' is not supported. Only 'human' and 'mouse' are currently supported.")
     
-    def _insert_mouse_genes(self):
-        """Load species-specific reference gene annotation data into the database.
+    def _insert_mouse_genes(self) -> None:
+        """Load mouse reference gene annotations into the `genes` table.
 
-        Currently supports `mouse` by downloading MGI gene metadata and
-        populating the `genes` reference table for symbol and Ensembl matching."""
+        The data comes from the bundled mouse gene mapping query.
+        """
 
        
         try:
@@ -302,11 +306,11 @@ class de_quackling:
 
     
 
-    def _insert_human_genes(self):
-        """Load species-specific reference gene annotation data into the database.
+    def _insert_human_genes(self) -> None:
+        """Load human reference gene annotations into the `genes` table.
 
-        Currently supports `human` by downloading HGNC gene metadata and
-        populating the `genes` reference table for symbol and Ensembl matching."""
+        The data comes from the bundled human gene mapping query.
+        """
 
         try:
             self.conn.execute(_gene_mapping_queries['human_genes'])
@@ -317,15 +321,21 @@ class de_quackling:
                 'Gene reference data appears to have already been loaded or the gene table has duplicate entries.'
             ) from e
 
-    def _create_experiment(self,metadata_fields, data_signature, other_info):
+    def _create_experiment(
+        self,
+        metadata_fields: ExperimentMetadataRecord,
+        data_signature: str,
+        other_info: str,
+    ) -> ExperimentId:
+        """Insert one experiment row and return the generated experiment id."""
         duplicate_ids = self.conn.execute(
             "SELECT experiment_id FROM experimental_data WHERE data_signature = ?", 
             (data_signature,)
         ).fetchall()
-        #if len(duplicate_ids) > 0:
-            #raise DuplicateExperimentError(
-                #f'Data is identical to data in experiment id: {duplicate_ids[0][0]}. Duplicate experiments are not allowed.'
-            #)
+        if len(duplicate_ids) > 0:
+            raise DuplicateExperimentError(
+                f'Data is identical to data in experiment id: {duplicate_ids[0][0]}. Duplicate experiments are not allowed.'
+            )
         result = self.conn.execute(
             "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
             (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, data_signature)
@@ -334,7 +344,8 @@ class de_quackling:
         
         return result[0][0]
 
-    def _insert_gene_results(self, experiment_id, view, species = None):
+    def _insert_gene_results(self, experiment_id: ExperimentId, view: duckdb.DuckDBPyRelation, species: str | None = None) -> None:
+        """Insert normalized gene-result rows for one experiment."""
 
 
         self.conn.execute('''
@@ -365,24 +376,30 @@ class de_quackling:
 
         self.conn.commit()
         
-    def ingest(self, info, metadata: dict = {}, species = 'human', columns = {}, **kwargs):
+    def ingest(
+        self,
+        info: object,
+        metadata: ExperimentMetadataRecord | None = None,
+        species: str = 'human',
+        columns: dict[str, str] | None = None,
+        **kwargs: ExperimentMetadataField,
+    ) -> None:
         """Normalize and ingest differential expression results into DuckDB.
 
         Args:
-            metadata: A dictionary containing the experiment metadata.
-            config_columns: A dictionary of additional configuration columns for the ingestion process.
-            **kwargs: Additional keyword arguments.
-
-            experiment_name: human-readable experiment name.
-            date: optional experiment date; auto-detected from file path or current time.
-            tool: optional source tool name.
-            **config_columns: additional configuration columns for the ingestion process.
-
-        The method validates required metadata, calculates a data signature,
-        prevents duplicate experiments, and loads normalized gene results into
-        `gene_results` with canonical symbol/Ensembl mapping.
+            metadata: Experiment metadata for the ingested table.
+            columns: Optional explicit column remapping for gene fields.
+            **kwargs: Additional metadata fields merged into `metadata`.
         """
+        if columns is None:
+            columns = {}
+        if metadata is None:
+            metadata = {}
         if kwargs:
+            parameters_and_keys = experiment_columns + ['metadata, columns, species']
+            for key in kwargs.items():
+                if difflib.get_close_matches(key, parameters_and_keys, n=1, cutoff=0.8):
+                    raise ProcessingError(f"Invalid metadata field: {key}. Did you mean '{difflib.get_close_matches(key, parameters_and_keys, n=1)[0]}'?")
             metadata.update(kwargs)
         metadata_fields, other_info = ExperimentMetadata().to_dict(metadata, info)
         self._preprocess(info) 
@@ -395,8 +412,18 @@ class de_quackling:
 
         self._insert_gene_results(id, view, species)
         
-
-    def get_experiment(self, id = None, name = None, model = None, annotation_version = None,  normalization = None, date = None, contrast = None, file = None):
+    def get_experiment(
+        self,
+        id: ExperimentId | None = None,
+        name: str | None = None,
+        model: str | None = None,
+        annotation_version: str | None = None,
+        normalization: str | None = None,
+        date: str | None = None,
+        contrast: str | None = None,
+        file: str | None = None,
+    ) -> "DeArrow | DeArrows":
+        """Return experiments matching the provided metadata filters."""
         try:
             date = datetime.datetime.strptime(date, '%Y-%m-%d').date() if date else None
         except ValueError:
@@ -409,25 +436,40 @@ class de_quackling:
         return _get_de_arrows(df, metadata_fields, ids)
         
     
-    def get_significant_genes(self, log2fc = 1, padj = 0.05, logCPM = 1, id = None):
+    def get_significant_genes(self, log2fc: float = 1, padj: float = 0.05, logCPM: float = 1, id: ExperimentId | None = None) -> "DeArrow | DeArrows":
+        """Return genes meeting the log2 fold change, padj, and expression cutoffs."""
         df = self.conn.execute('SELECT * FROM gene_results WHERE abs(log2fc) > $1 AND padj < $2 AND logCPM > $3 AND (experiment_id = $4 OR $4 IS NULL)', [log2fc, padj, logCPM, id]).pl()
         return self._polars_to_de_arrows(df)
 
-    def get_upregulated(self, log2fc = 1, padj = 0.05, logCPM = 1, id = None):
+    def get_upregulated(self, log2fc: float = 1, padj: float = 0.05, logCPM: float = 1, id: ExperimentId | None = None) -> "DeArrow | DeArrows":
+        """Return genes with positive log2 fold change above the threshold."""
         df = self.conn.execute('SELECT * FROM gene_results WHERE log2fc > $1 AND padj < $2 AND logCPM > $3 AND (experiment_id = $4 OR $4 IS NULL)', [log2fc, padj, logCPM, id]).pl()
         arrow = self._polars_to_de_arrows(df)
         return arrow
         
     
-    def get_downregulated(self, log2fc = -1, padj = 0.05, logCPM = 1, id = None):
+    def get_downregulated(self, log2fc: float = -1, padj: float = 0.05, logCPM: float = 1, id: ExperimentId | None = None) -> "DeArrow | DeArrows":
+        """Return genes with negative log2 fold change below the threshold."""
         df = self.conn.execute('SELECT * FROM gene_results WHERE log2fc < $1 AND padj < $2 AND logCPM > $3 AND (experiment_id = $4 OR $4 IS NULL)', [log2fc, padj, logCPM, id]).pl()
         return self._polars_to_de_arrows(df)
 
-    def get_gene(self, gene_symbol = None, ensembl_id = None, id = None):
+    def get_gene(self, gene_symbol: str | None = None, ensembl_id: str | None = None, id: ExperimentId | None = None) -> "DeArrow | DeArrows":
+        """Return genes matching the provided symbol, Ensembl id, and/or experiment id."""
         rel = self.conn.execute('SELECT * FROM gene_results WHERE (gene_symbol = $1 OR $1 IS NULL) AND (ensembl_id = $2 OR $2 IS NULL) AND (experiment_id = $3 OR $3 IS NULL)', [gene_symbol, ensembl_id, id]).pl()
         return self._polars_to_de_arrows(rel)
 
-    def delete_experiment(self, id = None, name = None, model = None, annotation_version = None,  normalization = None, date = None, contrast = None, file = None):
+    def delete_experiment(
+        self,
+        id: ExperimentId | None = None,
+        name: str | None = None,
+        model: str | None = None,
+        annotation_version: str | None = None,
+        normalization: str | None = None,
+        date: str | None = None,
+        contrast: str | None = None,
+        file: str | None = None,
+    ) -> None:
+        """Delete experiments and their gene-result rows for the matching filters."""
         try:
             date = datetime.datetime.strptime(date, '%Y-%m-%d').date() if date else None
         except ValueError:
@@ -437,12 +479,19 @@ class de_quackling:
             ids = self.conn.execute(core_queries['find_delete_experiment'], (id, date, model, file, name, contrast, annotation_version, normalization)).fetchall()
             ids = [row[0] for row in ids]
             self.conn.execute(core_queries['delete_gene_results'], (ids,))
-            self.conn.commit()
             self.conn.execute(core_queries['delete_experiment'], (ids,))
+        except Exception as e:
+            self.conn.rollback()
+            raise DeQuackError(f"Failed to delete experiment(s): {e}") from e
         finally:
             self.conn.commit()
+        
+        
+
+        
     
-    def _polars_to_de_arrows(self, df):
+    def _polars_to_de_arrows(self, df: pl.DataFrame) -> "DeArrow | DeArrows":
+        """Convert a Polars result frame into a `DeArrow` or `DeArrows` object."""
         if len(df.columns) == 0:
             return self._get_de_arrows(df, {}, [])
         ids = df['experiment_id'].unique().to_list()
@@ -477,24 +526,23 @@ class de_quackling:
 
     
 
-    def close(self):
-        """Close the active DuckDB connection and reset internal state."""
+    def close(self) -> None:
+        """Close the active DuckDB connection and clear the handle."""
         if self.conn:
             self.conn.close()
             self.conn = None
 
 
 
-    def execute_raw(self, query):
-        return self.conn.execute(query)
     
-def _get_de_arrows(arrows, metadata, ids):
+def _get_de_arrows(arrows: object, metadata: ExperimentMetadataMap, ids: list[ExperimentId]) -> "DeArrow | DeArrows":
     from .arrow import DeArrow, DeArrows
     if len(ids) < 2:
         return DeArrow._from_arrow(arrows, metadata, ids)
     return DeArrows._from_arrow(arrows, metadata, ids)
 
-def _to_metadata(metadata_list):
+def _to_metadata(metadata_list: list[ExperimentMetadataRecord]) -> tuple[ExperimentMetadataMap, list[ExperimentId]]:
+    """Flatten experiment metadata rows and merge any JSON `extra_info` payloads."""
     for meta in metadata_list:
         if meta.get('extra_info'):
             try:

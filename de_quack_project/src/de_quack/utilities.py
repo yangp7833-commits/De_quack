@@ -274,16 +274,19 @@ CORE_QUERIES = {
                             ($7 IS NULL OR annotation_version LIKE '%' || $7 || '%') AND
                             ($8 IS NULL OR normalization LIKE '%' || $8 || '%')
                         ''',
-    'delete_experiment': ''' 
-                        DELETE FROM experimental_data
-                        WHERE 
-                            experiment_id = ANY($1)
-                        ''',
-    'delete_gene_results': '''
+    'delete_gene_results': ''' 
                         DELETE FROM gene_results
-                        WHERE 
+                        WHERE
                             experiment_id = ANY($1)
                         ''',
+    'delete_experiment': '''
+                        DELETE FROM experimental_data
+                        WHERE
+                            experiment_id = ANY($1)
+                        ''',
+                        
+                       
+   
     'insert_de_arrow': '''INSERT INTO gene_results 
                             (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info) 
                             SELECT $1 AS experiment_id, 

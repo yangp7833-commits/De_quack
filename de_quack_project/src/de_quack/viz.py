@@ -3,7 +3,6 @@ import re
 import os
 from .exceptions import ProcessingError
 from .arrow import DeArrow, DeArrows, _to_polars_table, _order_columns
-from .core import de_quackling
 import polars as pl
 from .utilities import DE_ARROW_QUERIES
 
