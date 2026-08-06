@@ -4,6 +4,7 @@ import re
 import time
 import uuid
 from importlib import resources
+import importlib
 import hashlib
 import duckdb
 import polars as pl
@@ -204,7 +205,7 @@ class DeArrow:
     def __init__(
         self,
         info: object,
-        id: ExperimentId | None = None,
+        experiment_id: ExperimentId | None = None,
         metadata: ExperimentMetadataRecord | None = None,
         heal_genes: bool = False,
         species: str | None = None,
@@ -218,19 +219,19 @@ class DeArrow:
         if len(metadata) == 0:
             raise ProcessingError('No metadata provided in de_arrow object')
         
-        if id is None:
-            id = 1
+        if experiment_id is None:
+            experiment_id = 1
         
         if not isinstance(metadata, dict):
             raise ProcessingError('Metadata must be a dictionary')
-        self._table, self.experiment_metadata = self.__class__._to_de_arrow(info, metadata, columns, id, heal_genes = heal_genes, species = species)
-        self.name = _get_experiment_attribute(self.experiment_metadata, 'experiment_name', id)
-        self.annotation_version = _get_experiment_attribute(self.experiment_metadata, 'annotation_version', id)
-        self.contrast = _get_experiment_attribute(self.experiment_metadata, 'contrast', id)
-        self.file = _get_experiment_attribute(self.experiment_metadata, 'file', id)
-        self.date = _get_experiment_attribute(self.experiment_metadata, 'date', id)
-        self.model = _get_experiment_attribute(self.experiment_metadata, 'model', id)
-        self.id = id
+        self._table, self.experiment_metadata = self.__class__._to_de_arrow(info, metadata, columns, experiment_id, heal_genes = heal_genes, species = species)
+        self.name = _get_experiment_attribute(self.experiment_metadata, 'experiment_name', experiment_id)
+        self.annotation_version = _get_experiment_attribute(self.experiment_metadata, 'annotation_version', experiment_id)
+        self.contrast = _get_experiment_attribute(self.experiment_metadata, 'contrast', experiment_id)
+        self.file = _get_experiment_attribute(self.experiment_metadata, 'file', experiment_id)
+        self.date = _get_experiment_attribute(self.experiment_metadata, 'date', experiment_id)
+        self.model = _get_experiment_attribute(self.experiment_metadata, 'model', experiment_id)
+        self.id = experiment_id
     
     @classmethod
     def _to_de_arrow(
@@ -263,7 +264,7 @@ class DeArrow:
         cls,
         df: pl.DataFrame,
         metadata: ExperimentMetadataMap,
-        id: ExperimentId | None,
+        experiment_id: ExperimentId | None,
     ) -> "DeArrow":
         """
         Convert a nanoarrow array back into a de_arrow object.
@@ -283,13 +284,13 @@ class DeArrow:
         instance = cls.__new__(cls)
         instance._table = df
         instance.experiment_metadata = metadata
-        instance.name = _get_experiment_attribute(metadata, 'experiment_name', id)
-        instance.annotation_version = _get_experiment_attribute(metadata, 'annotation_version', id)
-        instance.contrast = _get_experiment_attribute(metadata, 'contrast', id)
-        instance.file = _get_experiment_attribute(metadata, 'file', id)
-        instance.date = _get_experiment_attribute(metadata, 'date', id)
-        instance.model = _get_experiment_attribute(metadata, 'model', id)
-        instance.id = id
+        instance.name = _get_experiment_attribute(metadata, 'experiment_name', experiment_id)
+        instance.annotation_version = _get_experiment_attribute(metadata, 'annotation_version', experiment_id)
+        instance.contrast = _get_experiment_attribute(metadata, 'contrast', experiment_id)
+        instance.file = _get_experiment_attribute(metadata, 'file', experiment_id)
+        instance.date = _get_experiment_attribute(metadata, 'date', experiment_id)
+        instance.model = _get_experiment_attribute(metadata, 'model', experiment_id)
+        instance.id = experiment_id
         return instance
 
         
@@ -367,25 +368,25 @@ class DeArrow:
         )
         return self._from_arrow(frame, self.experiment_metadata, self.id)
 
-    def set_id(self, id: ExperimentId) -> "DeArrow":
-        if isinstance(id, int):
-            frame = self._table.with_columns(pl.lit(id).alias('experiment_id'))
-            metadata = {id: self.experiment_metadata[self.id]}
-            return self._from_arrow(frame, metadata, id)
-        raise DeQuackError(f'set_ids expected an integer, not {type(id)}')
+    def set_id(self, experiment_id: ExperimentId) -> "DeArrow":
+        if isinstance(experiment_id, int):
+            frame = self._table.with_columns(pl.lit(experiment_id).alias('experiment_id'))
+            metadata = {experiment_id: self.experiment_metadata[self.id]}
+            return self._from_arrow(frame, metadata, experiment_id)
+        raise DeQuackError(f'set_ids expected an integer, not {type(experiment_id)}')
 
 
     def get_gene(
         self,
         gene_symbol: str | None = None,
         ensembl_id: str | None = None,
-        id: ExperimentId | None = None,
+        experiment_id: ExperimentId | None = None,
     ) -> "DeArrow":
         required_columns = {'gene_symbol', 'ensembl_id'}
         _check_columns(required_columns, self.columns)
         expression = pl.lit(True)
-        if id is not None and 'experiment_id' in self.columns:
-            expression = expression & (pl.col('experiment_id') == id)
+        if experiment_id is not None and 'experiment_id' in self.columns:
+            expression = expression & (pl.col('experiment_id') == experiment_id)
         if gene_symbol is not None:
             expression = expression & (pl.col('gene_symbol') == gene_symbol)
         if ensembl_id is not None:
@@ -398,7 +399,7 @@ class DeArrow:
         self,
         data: object,
         metadata: ExperimentMetadataRecord | None = None,
-        id: ExperimentId | None = None,
+        experiment_id: ExperimentId | None = None,
         **fields: ExperimentMetadataField,
     ) -> "DeArrows":
 
@@ -406,11 +407,11 @@ class DeArrow:
         if metadata is None and fields:
             metadata = fields 
         if isinstance(data, DeArrow):
-            df, meta, new_ids = _add_experiment_arrow(self._table, self.experiment_metadata, ids, data, id)
+            df, meta, new_ids = _add_experiment_arrow(self._table, self.experiment_metadata, ids, data, experiment_id)
         elif isinstance(data, DeArrows):
-            df, meta, new_ids = _add_experiment_arrows(self._table, self.experiment_metadata, ids, data, id)
+            df, meta, new_ids = _add_experiment_arrows(self._table, self.experiment_metadata, ids, data, experiment_id)
         else:
-            df, meta, new_ids = _add_experiment_data(self._table, self.experiment_metadata, ids, data, metadata, id)
+            df, meta, new_ids = _add_experiment_data(self._table, self.experiment_metadata, ids, data, metadata, experiment_id)
         return DeArrows._from_arrow(df, meta, new_ids)
     
 
@@ -440,11 +441,10 @@ class DeArrow:
                 db.initialize_gene_table(species)
             except DuplicateGeneTableError:
                 raise DuplicateGeneTableError(f'Gene table for {species} already exists in database. Please use a different species or set initialize_gene_table to False')
-        sample_data = df.select(pl.all()).limit(50)
-        data_signature = hashlib.md5(str(sample_data).encode()).hexdigest()
+        data_signature = hashlib.sha256(str(df).encode()).hexdigest()
         result = db.conn.execute(
-            "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
-            (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, data_signature)
+            "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature, duckDB_version, de_quack_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
+            (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, data_signature, importlib.metadata.version('duckdb'), importlib.metadata.version('de_quack'))
         ).fetchall()
         db.conn.execute(_core_queries['insert_de_arrow'], (result[0][0], species))
         db.conn.commit()
@@ -690,7 +690,7 @@ class DeArrows:
     
     def get_experiment(
         self,
-        id: ExperimentId | list[ExperimentId] | None = None,
+        experiment_id: ExperimentId | list[ExperimentId] | None = None,
         name: str | list[str] | None = None,
         model: str | list[str] | None = None,
         annotation_version: str | list[str] | None = None,
@@ -701,11 +701,11 @@ class DeArrows:
     ) -> "DeArrow | DeArrows":
 
         selected_ids = set(self.id)
-        if id is not None:
-            if isinstance(id, list):
-                selected_ids = {item for item in self.id if item in id}
+        if experiment_id is not None:
+            if isinstance(experiment_id, list):
+                selected_ids = {item for item in self.id if item in experiment_id}
             else:
-                selected_ids = {item for item in self.id if item == id}
+                selected_ids = {item for item in self.id if item == experiment_id}
 
 
             def matches(meta: ExperimentMetadataRecord) -> bool:
@@ -740,8 +740,8 @@ class DeArrows:
     def _finalize_table(self, df: pl.DataFrame) -> "DeArrow | DeArrows":
         df_ids = df.select('experiment_id').unique().to_series().to_list() if 'experiment_id' in df.columns else []
         metadata = {}
-        for id in df_ids:
-            metadata[id] = self.experiment_metadata.get(id, {})
+        for experiment_id in df_ids:
+            metadata[experiment_id] = self.experiment_metadata.get(experiment_id, {})
         if len(df_ids) == 0:
             return DeArrow._from_arrow(df, metadata, None)
         if len(df_ids) == 1:
@@ -782,13 +782,13 @@ class DeArrows:
         self,
         gene_symbol: str | None = None,
         ensembl_id: str | None = None,
-        id: ExperimentId | None = None,
+        experiment_id: ExperimentId | None = None,
     ) -> "DeArrows":
         required_columns = {'gene_symbol', 'ensembl_id'}
         _check_columns(required_columns, self.columns)
         expression = pl.lit(True)
-        if id is not None and 'experiment_id' in self.columns:
-            expression = expression & (pl.col('experiment_id') == id)
+        if experiment_id is not None and 'experiment_id' in self.columns:
+            expression = expression & (pl.col('experiment_id') == experiment_id)
         if gene_symbol is not None:
             expression = expression & (pl.col('gene_symbol') == gene_symbol)
         if ensembl_id is not None:
@@ -813,17 +813,16 @@ class DeArrows:
         db = DeQuackling(file).connect()
         old_ids = self.id
         new_ids = []
-        for id in old_ids:        
-            metadata_fields = self.experiment_metadata[id]
+        for experiment_id in old_ids:        
+            metadata_fields = self.experiment_metadata[experiment_id]
             other_info = {}
             for key in metadata_fields.keys():
                 if key not in ['model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization']:
                     other_info[key] = metadata_fields.pop(key)
-            sample_data = df.select(pl.all()).limit(50)
-            data_signature = hashlib.md5(str(sample_data).encode()).hexdigest()
+            data_signature = hashlib.sha256(str(df).encode()).hexdigest()
             result = db.conn.execute(
-                "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
-                (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, data_signature)
+                "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature, duckDB_version, de_quack_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
+                (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, data_signature, importlib.metadata.version('duckdb'), importlib.metadata.version('de_quack'))
             ).fetchall()
             new_ids.append(result[0][0])
         id_map = pl.DataFrame({'old_id': old_ids, 'new_id': new_ids}, schema = {'old_id': pl.Int32(), 'new_id': pl.Int32()})
@@ -841,18 +840,18 @@ class DeArrows:
         self,
         data: object,
         metadata: ExperimentMetadataRecord | None = None,
-        id: ExperimentId | None = None,
+        experiment_id: ExperimentId | None = None,
         **fields: ExperimentMetadataField,
     ) -> "DeArrows":
         meta = dict(self.experiment_metadata)
         if metadata is not None and fields:
             metadata.update(fields)
         if isinstance(data, DeArrow):
-            df, meta, new_ids = _add_experiment_arrow(self._table.clone(), meta, self.id, data, id)
+            df, meta, new_ids = _add_experiment_arrow(self._table.clone(), meta, self.id, data, experiment_id)
         elif isinstance(data, DeArrows):
-            df, meta, new_ids = _add_experiment_arrows(self._table.clone(), meta, self.id, data, id)
+            df, meta, new_ids = _add_experiment_arrows(self._table.clone(), meta, self.id, data, experiment_id)
         else:
-            df, meta, new_ids = _add_experiment_data(self._table.clone(), meta, self.id, data, metadata, id)
+            df, meta, new_ids = _add_experiment_data(self._table.clone(), meta, self.id, data, metadata, experiment_id)
         return DeArrows._from_arrow(df, meta, new_ids)
     
 
@@ -861,15 +860,15 @@ def _add_experiment_arrow(
     meta: ExperimentMetadataMap,
     ids: list[ExperimentId],
     data: DeArrow,
-    id: ExperimentId | None = None,
+    experiment_id: ExperimentId | None = None,
 ) -> tuple[pl.DataFrame, ExperimentMetadataMap, list[ExperimentId]]:
     frame = data._table
-    if id is not None:
-        frame = frame.with_columns(pl.lit(id).alias('experiment_id'))
+    if experiment_id is not None:
+        frame = frame.with_columns(pl.lit(experiment_id).alias('experiment_id'))
     df.extend(frame)
-    id = id or data.id
-    new_metadata = {id: data.experiment_metadata[data.id]}
-    new_ids = ids + [id]
+    experiment_id = experiment_id or data.id
+    new_metadata = {experiment_id: data.experiment_metadata[data.id]}
+    new_ids = ids + [experiment_id]
     meta.update(new_metadata)
     return (df, meta, new_ids)
 
@@ -903,26 +902,26 @@ def _add_experiment_data(
     ids: list[ExperimentId],
     data: object,
     metadata: ExperimentMetadataRecord,
-    id: ExperimentId,
+    experiment_id: ExperimentId,
 ) -> tuple[pl.DataFrame, ExperimentMetadataMap, list[ExperimentId]]:
     frame = _to_polars_table(data)
     frame = _order_columns(frame)
-    if id is None:
+    if experiment_id is None:
         raise DeQuackError('id must be provided when adding a non-de_arrow table')
-    if not isinstance(id, int):
+    if not isinstance(experiment_id, int):
         raise DeQuackError('id must be an integer when adding a non-de_arrow table')
     if metadata is None:
         raise DeQuackError('metadata must be provided when adding a non-de_arrow table')
     if not isinstance(metadata, dict):
         raise DeQuackError('metadata must be a dictionary when adding a non-de_arrow table')
-    frame = frame.insert_column(0, pl.lit(id).alias('experiment_id'))
+    frame = frame.insert_column(0, pl.lit(experiment_id).alias('experiment_id'))
     metadata_fields, extra_info=ExperimentMetadata().to_dict(metadata, data)
     for key, value in json.loads(extra_info).items():
         metadata_fields[key]=value
-    new_metadata = {id: metadata_fields}
+    new_metadata = {experiment_id: metadata_fields}
     frame = _clean_df(frame)
     df.extend(frame)
-    new_ids = ids + [id]
+    new_ids = ids + [experiment_id]
     meta.update(new_metadata)
     return (df, meta, new_ids)
     

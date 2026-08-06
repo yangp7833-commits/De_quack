@@ -29,8 +29,8 @@ class TestArrow():
     
     def test_arrow_add(self):
         arrow = DeArrow('data.txt', metadata = {'experiment_name': 'Test Experiment'}, heal_genes = True)
-        arrows = arrow.add_experiment('data1.txt', metadata = {'experiment_name': 'Test Experiment 2'}, id = 3)
-        arrows2 = arrows.add_experiment('data.txt', metadata = {'experiment_name': 'Test Experiment 3'}, id = 4)
+        arrows = arrow.add_experiment('data1.txt', metadata = {'experiment_name': 'Test Experiment 2'}, experiment_id = 3)
+        arrows2 = arrows.add_experiment('data.txt', metadata = {'experiment_name': 'Test Experiment 3'}, experiment_id = 4)
         assert arrows._table.height > 0
         assert arrows.get_gene('PTEN').height > 0 and arrows.get_gene(ensembl_id = 'ENSMUSG00000000017').height > 0
         assert arrows.id == [1, 3]
@@ -44,7 +44,7 @@ class TestArrow():
     
     def test_arrow_insert(self):
         arrow = DeArrow('data.txt', metadata = {'experiment_name': 'Test Experiment'}, heal_genes = True)
-        arrows = arrow.add_experiment('data1.txt', metadata = {'experiment_name': 'Test Experiment 2'}, id = 3)
+        arrows = arrow.add_experiment('data1.txt', metadata = {'experiment_name': 'Test Experiment 2'}, experiment_id = 3)
         with DeQuackling() as db:
             arrows.insert('SQL.duckdb')
             arrow.insert('SQL.duckdb')

@@ -26,8 +26,9 @@ import datetime
 import polars as pl
 from typing import TypeAlias
 from .exceptions import ProcessingError, DuplicateExperimentError, DuplicateGeneTableError, DeQuackError
-from .utilities import gene_columns, ExperimentMetadata, CORE_QUERIES, gene_mapping
+from .utilities import gene_columns, ExperimentMetadata, CORE_QUERIES, gene_mapping, _setup_logger
 import time
+import importlib
 _gene_mapping_queries = gene_mapping
 core_queries = CORE_QUERIES
 experiment_columns=['experiment_id', 'model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization', 'extra_info']
@@ -42,6 +43,12 @@ _GENE_ALIAS_TO_COLUMN = {
     for canonical, aliases in gene_columns.items()
     for alias in aliases + [canonical]
 }
+
+logger = _setup_logger()
+
+def _get_gene_table(species: str) -> object:
+    folder = importlib.resources.files('de_quack') / 'gene_tables'
+    return folder / f'{species}_genes.parquet'
 
 class DeQuackling:
     def __init__(self, db_path: str = 'SQL.duckdb') -> None:
@@ -71,6 +78,7 @@ class DeQuackling:
         self.experiment_columns = self.conn.execute("SELECT * FROM information_schema.columns WHERE table_name='experimental_data'").fetchall()
         return self
     
+    
     def _initialize_tables(self) -> None:
         """Create the core tables, sequence, and indexes used by the database."""
         self.conn.execute('''CREATE SEQUENCE IF NOT EXISTS seq_experiment_id START 1''')
@@ -79,7 +87,8 @@ class DeQuackling:
         self.conn.execute('''CREATE TABLE IF NOT EXISTS experimental_data
                             (experiment_id INTEGER PRIMARY KEY DEFAULT nextval('seq_experiment_id'), 
                              model VARCHAR, date VARCHAR, file VARCHAR, 
-                             experiment_name VARCHAR, contrast VARCHAR, annotation_version VARCHAR, normalization VARCHAR, other_info VARCHAR, data_signature VARCHAR)''')
+                             experiment_name VARCHAR, contrast VARCHAR, annotation_version VARCHAR, normalization VARCHAR, other_info VARCHAR, data_signature VARCHAR,
+                             duckDB_version VARCHAR, de_quack_version VARCHAR)''')
         
         
         
@@ -114,6 +123,7 @@ class DeQuackling:
         
         # Create indexes
         self.conn.execute('CREATE INDEX IF NOT EXISTS idx_gene_name_lookup ON gene_results(gene_symbol, experiment_id)')
+        logger.info("Initialized DuckDB schema with tables: experimental_data, gene_results, genes.")
     
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
         """Close the DuckDB connection when leaving the context manager."""
@@ -134,11 +144,19 @@ class DeQuackling:
 
 
     def _get_data_signature(self) -> str:
-        """Return an md5 signature for the first 100 rows of the preprocessed input."""
-        sample_data=self.conn.execute('SELECT * FROM (SELECT * FROM preprocessed_data LIMIT 100)').fetchall()
-    
-        # Generate a unique string (hash) from that data
-        return hashlib.md5(str(sample_data).encode()).hexdigest()
+        """Deterministic SHA-256 signature of the full normalized dataset,
+        order-independent (rows hashed individually, then combined)."""
+        view = self.conn.view('preprocessed_data')
+        cols = ', '.join(f'CAST({c} AS VARCHAR)' for c in view.columns)
+        result = self.conn.execute(f'''
+            SELECT sha256(string_agg(row_hash, '' ORDER BY row_hash))
+            FROM (
+                SELECT sha256(concat_ws('\x1f', {cols})) AS row_hash
+                FROM view
+            )
+        ''').fetchone()
+        logger.info('Computed data signature for normalized dataset.')
+        return result[0]
 
    
     
@@ -294,10 +312,11 @@ class DeQuackling:
 
         The data comes from the bundled mouse gene mapping query.
         """
-
+        table_path = _get_gene_table('mouse')
+        
        
         try:
-            self.conn.execute(_gene_mapping_queries['mouse_genes'])
+            self.conn.execute('INSERT INTO genes SELECT * FROM read_parquet(?)', (str(table_path),))
             self.conn.commit()
         except duckdb.ConstraintException as e:
             raise DuplicateGeneTableError(
@@ -312,8 +331,9 @@ class DeQuackling:
         The data comes from the bundled human gene mapping query.
         """
 
+        table_path = _get_gene_table('human')
         try:
-            self.conn.execute(_gene_mapping_queries['human_genes'])
+            self.conn.execute('INSERT INTO genes SELECT * FROM read_parquet(?)', (str(table_path),))
             self.conn.commit()
 
         except duckdb.ConstraintException as e:
@@ -337,8 +357,8 @@ class DeQuackling:
                 f'Data is identical to data in experiment id: {duplicate_ids[0][0]}. Duplicate experiments are not allowed.'
             )
         result = self.conn.execute(
-            "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
-            (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, data_signature)
+            "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature, duckDB_version, de_quack_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
+            (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, data_signature, importlib.metadata.version('duckdb'), importlib.metadata.version('de_quack'))
         ).fetchall()
         self.conn.commit()
         
@@ -406,15 +426,15 @@ class DeQuackling:
 
         data_signature = self._get_data_signature()
 
-        id = self._create_experiment(metadata_fields, data_signature, other_info)
+        experiment_id = self._create_experiment(metadata_fields, data_signature, other_info)
 
         view=self._create_temp_view(columns)
 
-        self._insert_gene_results(id, view, species)
+        self._insert_gene_results(experiment_id, view, species)
         
     def get_experiment(
         self,
-        id: ExperimentId | None = None,
+        experiment_id: ExperimentId | None = None,
         name: str | None = None,
         model: str | None = None,
         annotation_version: str | None = None,
@@ -428,7 +448,7 @@ class DeQuackling:
             date = datetime.datetime.strptime(date, '%Y-%m-%d').date() if date else None
         except ValueError:
             raise ProcessingError(f"Invalid date format: {date}. Expected format is YYYY-MM-DD.")
-        rel = self.conn.execute(core_queries['get_experiment'], [id, date, model, file, name, contrast, annotation_version, normalization]).fetchall()
+        rel = self.conn.execute(core_queries['get_experiment'], [experiment_id, date, model, file, name, contrast, annotation_version, normalization]).fetchall()
         metadata_list = [dict(zip(experiment_columns, row)) for row in rel]
         metadata_fields, ids = _to_metadata(metadata_list)
         self.conn.execute(f'CREATE OR REPLACE TEMP TABLE ids AS SELECT UNNEST({ids}) AS id')
@@ -436,31 +456,31 @@ class DeQuackling:
         return _get_de_arrows(df, metadata_fields, ids)
         
     
-    def get_significant_genes(self, log2fc: float = 1, padj: float = 0.05, logCPM: float = 1, id: ExperimentId | None = None) -> "DeArrow | DeArrows":
+    def get_significant_genes(self, log2fc: float = 1, padj: float = 0.05, logCPM: float = 1, experiment_id: ExperimentId | None = None) -> "DeArrow | DeArrows":
         """Return genes meeting the log2 fold change, padj, and expression cutoffs."""
-        df = self.conn.execute('SELECT * FROM gene_results WHERE abs(log2fc) > $1 AND padj < $2 AND logCPM > $3 AND (experiment_id = $4 OR $4 IS NULL)', [log2fc, padj, logCPM, id]).pl()
+        df = self.conn.execute('SELECT * FROM gene_results WHERE abs(log2fc) > $1 AND padj < $2 AND logCPM > $3 AND (experiment_id = $4 OR $4 IS NULL)', [log2fc, padj, logCPM, experiment_id]).pl()
         return self._polars_to_de_arrows(df)
 
-    def get_upregulated(self, log2fc: float = 1, padj: float = 0.05, logCPM: float = 1, id: ExperimentId | None = None) -> "DeArrow | DeArrows":
+    def get_upregulated(self, log2fc: float = 1, padj: float = 0.05, logCPM: float = 1, experiment_id: ExperimentId | None = None) -> "DeArrow | DeArrows":
         """Return genes with positive log2 fold change above the threshold."""
-        df = self.conn.execute('SELECT * FROM gene_results WHERE log2fc > $1 AND padj < $2 AND logCPM > $3 AND (experiment_id = $4 OR $4 IS NULL)', [log2fc, padj, logCPM, id]).pl()
+        df = self.conn.execute('SELECT * FROM gene_results WHERE log2fc > $1 AND padj < $2 AND logCPM > $3 AND (experiment_id = $4 OR $4 IS NULL)', [log2fc, padj, logCPM, experiment_id]).pl()
         arrow = self._polars_to_de_arrows(df)
         return arrow
         
     
-    def get_downregulated(self, log2fc: float = -1, padj: float = 0.05, logCPM: float = 1, id: ExperimentId | None = None) -> "DeArrow | DeArrows":
+    def get_downregulated(self, log2fc: float = -1, padj: float = 0.05, logCPM: float = 1, experiment_id: ExperimentId | None = None) -> "DeArrow | DeArrows":
         """Return genes with negative log2 fold change below the threshold."""
-        df = self.conn.execute('SELECT * FROM gene_results WHERE log2fc < $1 AND padj < $2 AND logCPM > $3 AND (experiment_id = $4 OR $4 IS NULL)', [log2fc, padj, logCPM, id]).pl()
+        df = self.conn.execute('SELECT * FROM gene_results WHERE log2fc < $1 AND padj < $2 AND logCPM > $3 AND (experiment_id = $4 OR $4 IS NULL)', [log2fc, padj, logCPM, experiment_id]).pl()
         return self._polars_to_de_arrows(df)
 
-    def get_gene(self, gene_symbol: str | None = None, ensembl_id: str | None = None, id: ExperimentId | None = None) -> "DeArrow | DeArrows":
+    def get_gene(self, gene_symbol: str | None = None, ensembl_id: str | None = None, experiment_id: ExperimentId | None = None) -> "DeArrow | DeArrows":
         """Return genes matching the provided symbol, Ensembl id, and/or experiment id."""
-        rel = self.conn.execute('SELECT * FROM gene_results WHERE (gene_symbol = $1 OR $1 IS NULL) AND (ensembl_id = $2 OR $2 IS NULL) AND (experiment_id = $3 OR $3 IS NULL)', [gene_symbol, ensembl_id, id]).pl()
+        rel = self.conn.execute('SELECT * FROM gene_results WHERE (gene_symbol = $1 OR $1 IS NULL) AND (ensembl_id = $2 OR $2 IS NULL) AND (experiment_id = $3 OR $3 IS NULL)', [gene_symbol, ensembl_id, experiment_id]).pl()
         return self._polars_to_de_arrows(rel)
 
     def delete_experiment(
         self,
-        id: ExperimentId | None = None,
+        experiment_id: ExperimentId | None = None,
         name: str | None = None,
         model: str | None = None,
         annotation_version: str | None = None,
@@ -476,7 +496,7 @@ class DeQuackling:
             raise ProcessingError(f"Invalid date format: {date}. Expected format is YYYY-MM-DD.")
         try:
             self.conn.begin()
-            ids = self.conn.execute(core_queries['find_delete_experiment'], (id, date, model, file, name, contrast, annotation_version, normalization)).fetchall()
+            ids = self.conn.execute(core_queries['find_delete_experiment'], (experiment_id, date, model, file, name, contrast, annotation_version, normalization)).fetchall()
             ids = [row[0] for row in ids]
             self.conn.execute(core_queries['delete_gene_results'], (ids,))
             self.conn.execute(core_queries['delete_experiment'], (ids,))
@@ -550,7 +570,7 @@ def _to_metadata(metadata_list: list[ExperimentMetadataRecord]) -> tuple[Experim
                 for key, value in extra.items():
                     meta[key] = value
             except json.JSONDecodeError:
-                pass
+                raise ProcessingError (f"Failed to parse 'extra_info' JSON for experiment_id {meta.get('experiment_id')}. Ensure it is valid JSON.")
         meta.pop('extra_info', None)
     ids = [meta.pop('experiment_id') for meta in metadata_list]
     metadata_fields = {exp_id: meta for meta, exp_id in zip(metadata_list, ids)}
