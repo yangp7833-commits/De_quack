@@ -26,10 +26,9 @@ import datetime
 import polars as pl
 from typing import TypeAlias
 from .exceptions import ProcessingError, DuplicateExperimentError, DuplicateGeneTableError, DeQuackError
-from .utilities import gene_columns, ExperimentMetadata, CORE_QUERIES, gene_mapping, _setup_logger
+from .utilities import gene_columns, ExperimentMetadata, CORE_QUERIES, _setup_logger
 import time
 import importlib
-_gene_mapping_queries = gene_mapping
 core_queries = CORE_QUERIES
 experiment_columns=['experiment_id', 'model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization', 'extra_info']
 
@@ -322,6 +321,7 @@ class DeQuackling:
             raise DuplicateGeneTableError(
                 'Gene reference data appears to have already been loaded or the gene table has duplicate entries.'
             ) from e
+        logger.info('Mouse gene reference data loaded into the `genes` table.')
 
     
 
@@ -340,6 +340,7 @@ class DeQuackling:
             raise DuplicateGeneTableError(
                 'Gene reference data appears to have already been loaded or the gene table has duplicate entries.'
             ) from e
+        logger.info('Human gene reference data loaded into the `genes` table.')
 
     def _create_experiment(
         self,
@@ -368,6 +369,7 @@ class DeQuackling:
         """Insert normalized gene-result rows for one experiment."""
 
 
+
         self.conn.execute('''
         INSERT INTO gene_results (experiment_id, gene_symbol, ensembl_id, log2fc, logCPM, pvalue, padj, stat, other_info)
         SELECT $1 AS experiment_id,
@@ -387,15 +389,32 @@ class DeQuackling:
         LEFT JOIN genes sym ON 
             (e.gene_symbol IS NOT NULL AND sym.symbol = e.gene_symbol) OR
             e.gene_symbol IS NOT NULL AND sym.prev_symbol IS NOT NULL AND list_contains(sym.prev_symbol, e.gene_symbol)
-            
+        
         
         WHERE (sym.species IS NULL OR sym.species = $2) AND (ens.species IS NULL OR ens.species = $2)
-        
-        
         ''', (experiment_id, species))
+
+        mismatch_count = self.conn.execute("""
+        SELECT COUNT(*)
+        FROM view AS e
+        LEFT JOIN genes ens ON (
+            e.ensembl_id IS NOT NULL AND ens.ensembl_id = UPPER(TRIM(e.ensembl_id))
+        )
+        LEFT JOIN genes sym ON (
+            e.gene_symbol IS NOT NULL AND sym.symbol = e.gene_symbol
+        ) OR (
+        e.gene_symbol IS NOT NULL AND sym.prev_symbol IS NOT NULL AND list_contains(sym.prev_symbol, e.gene_symbol)
+        )
+        WHERE (sym.species IS NULL OR sym.species = $1) AND (ens.species IS NULL OR ens.species = $1)
+        AND ens.ensembl_id IS NULL AND sym.symbol IS NULL
+        """, (species,)).fetchone()[0]
+
+        if mismatch_count > 0:
+            logger.warning(f"{mismatch_count} gene results could not be matched to the reference gene table for species '{species}'. Check the 'gene_symbol' and 'ensembl_id' columns for potential mismatches.")
 
         self.conn.commit()
         
+
     def ingest(
         self,
         info: object,
@@ -500,11 +519,16 @@ class DeQuackling:
             ids = [row[0] for row in ids]
             self.conn.execute(core_queries['delete_gene_results'], (ids,))
             self.conn.execute(core_queries['delete_experiment'], (ids,))
+            deleted_genes = self.conn.execute('SELECT COUNT(*) FROM gene_results WHERE experiment_id = ANY(?)', (ids,)).fetchone()[0]
+            logger.info(f'Deleted {deleted_genes} gene result rows and {len(ids)} experiment metadata rows for experiment_id(s): {ids}.')
+            logger.info(f'Deleted {len(ids)} experiment(s) with experiment_id(s): {ids}.')
         except Exception as e:
             self.conn.rollback()
             raise DeQuackError(f"Failed to delete experiment(s): {e}") from e
         finally:
             self.conn.commit()
+            
+            
         
         
 

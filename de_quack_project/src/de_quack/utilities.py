@@ -54,118 +54,8 @@ def _error(message: str):
     logger.error(message)
 
 
-DE_ARROW_QUERIES={
 
 
-    'insert_to_de_arrow': 
-                        '''
-                        SELECT 
-                                $id AS experiment_id,
-                                COALESCE(ens.symbol, sym.symbol, e.gene_symbol) AS gene_symbol,
-                                COALESCE(ens.ensembl_id, sym.ensembl_id, e.ensembl_id) AS ensembl_id,
-                                COALESCE(TRY_CAST(e.log2fc AS DOUBLE), NULL) AS log2fc,
-                                COALESCE(TRY_CAST(e.logCPM AS DOUBLE), log2(e.base_mean + 1), NULL) AS logCPM,
-                                COALESCE(TRY_CAST(e.pvalue AS DOUBLE), NULL) AS pvalue,
-                                COALESCE(TRY_CAST(e.padj AS DOUBLE), NULL) AS padj,
-                                COALESCE(TRY_CAST(e.stat AS DOUBLE), NULL) AS stat,
-                                e.other_info
-                        FROM de_arrow_insertion_view as e
-                            LEFT JOIN genes ens ON  (
-                            e.ensembl_id IS NOT NULL AND ens.ensembl_id = UPPER(TRIM(e.ensembl_id))
-                    )
-
-                        LEFT JOIN genes sym ON (
-                            e.gene_symbol IS NOT NULL AND sym.symbol = UPPER(TRIM(e.gene_symbol)) OR
-                            e.gene_symbol IS NOT NULL AND sym.prev_symbol IS NOT NULL AND list_contains(sym.prev_symbol, e.gene_symbol)
-                    )''',
-        
-    'map_mouse': '''SELECT 
-                        *
-                        FROM gene_table
-                        LEFT JOIN csv_data ON gene_table.symbol = csv_data.column03 OR gene_table.ensembl_id = csv_data.column10
-                        WITH csv_data AS (
-                        SELECT 
-                            csv_data.column03 as symbol,
-                            CAST(regexp_replace(csv_data.column00, '^MGI:', '', 'i') AS INTEGER) AS id,
-                            csv_data.column10 as ensembl_id
-                        FROM
-                        read_csv_auto('https://www.informatics.jax.org/downloads/reports/MGI_Gene_Model_Coord.rpt', strict_mode = false, delim = '\t', skip = 2))
-                ''',
-    'map_human': '''SELECT 
-                csv_data.symbol as gene_symbol,
-                csv_data.ensembl_gene_id as ensembl_id
-                FROM read_csv_auto('https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt') AS csv_data
-                '''
-            
-    }
-
-DE_ARROWS_QUERIES={
-    'insertion_from_table' : '''
-                                WITH numbered_ids AS (
-                                SELECT ids AS new_id, row_number() OVER () AS r_num FROM ids
-                                    ),
-                                numbered_data AS (
-                                SELECT *, row_number() OVER () AS r_num FROM experimental_data)
-                                    SELECT
-                                        COALESCE(i.new_id, e.experiment_id) AS experiment_id,
-                                        e.model,
-                                        e.date,
-                                        e.file,
-                                        e.experiment_name,
-                                        e.contrast,
-                                        e.annotation_version,
-                                        e.normalization,
-                                        e.other_info AS extra_info,
-                                        g.gene_symbol,
-                                        g.ensembl_id,
-                                        g.log2fc,
-                                        g.logCPM,
-                                        g.pvalue,
-                                        g.padj,
-                                        g.stat,
-                                        g.other_info
-                                FROM numbered_data e
-                                LEFT JOIN numbered_ids i ON e.r_num = i.r_num
-                                LEFT JOIN gene_results g
-                                    ON e.experiment_id = g.experiment_id''',
-    'set_ids' : '''             SELECT  
-                                        COALESCE(i.new_id, g.experiment_id) AS experiment_id,      
-                                        g.gene_symbol,
-                                        g.ensembl_id,
-                                        g.log2fc,
-                                        g.logCPM,
-                                        g.pvalue,
-                                        g.padj,
-                                        g.stat,
-                                        g.other_info
-                                FROM arrow_table g
-                                LEFT JOIN ids_rel i ON i.old_id = g.experiment_id
-                                ''',
-                'get_experiment':   '''
-                                    SELECT  
-                                        g.experiment_id,      
-                                        g.gene_symbol,
-                                        g.ensembl_id,
-                                        g.log2fc,
-                                        g.logCPM,
-                                        g.pvalue,
-                                        g.padj,
-                                        g.stat,
-                                        g.other_info
-                                FROM arrow_table g
-                                WHERE
-                                    g.experiment_id IN $ids
-                                ''',
-                'get_gene': '''
-                            SELECT * FROM arrow_table
-                            WHERE
-                                ($id IS NULL OR experiment_id = $id) AND
-                                ($gene_symbol IS NULL OR gene_symbol = $gene_symbol) AND
-                                ($ensembl_id IS NULL OR ensembl_id = $ensembl_id)'''
-
-
-
-    }
 
 CORE_QUERIES = {
     'get_experiment': '''
@@ -191,77 +81,8 @@ CORE_QUERIES = {
                             ($7 IS NULL OR e.annotation_version LIKE '%' || $7 || '%') AND
                             ($8 IS NULL OR e.normalization LIKE '%' || $8 || '%')
                      ''',
-    'get_significant': '''
-                        SELECT
-                            g.experiment_id,
-                            g.gene_symbol,
-                            g.ensembl_id,
-                            g.log2fc,
-                            g.logCPM,
-                            g.pvalue,
-                            g.padj,
-                            g.stat,
-                            g.other_info
-                        FROM gene_results g
-                        WHERE 
-                            abs(g.log2fc) >= $log2fc AND
-                            g.logCPM >= $logCPM AND
-                            g.padj <= $padj AND
-                            ($id IS NULL OR g.experiment_id = $id)
-                            ''',
-    'get_upregulated': '''
-                        SELECT
-                            g.experiment_id,
-                            g.gene_symbol,
-                            g.ensembl_id,
-                            g.log2fc,
-                            g.logCPM,
-                            g.pvalue,
-                            g.padj,
-                            g.stat,
-                            g.other_info
-                        FROM gene_results g
-                        WHERE 
-                            g.log2fc >= $log2fc AND
-                            g.logCPM >= $logCPM AND
-                            g.padj <= $padj AND
-                            ($id IS NULL OR g.experiment_id = $id)
-                            ''',
-    'get_downregulated': '''
-                            SELECT
-                            g.experiment_id,
-                            g.gene_symbol,
-                            g.ensembl_id,
-                            g.log2fc,
-                            g.logCPM,
-                            g.pvalue,
-                            g.padj,
-                            g.stat,
-                            g.other_info
-                        FROM gene_results g
-                        WHERE 
-                            g.log2fc <= $log2fc AND
-                            g.logCPM >= $logCPM AND
-                            g.padj <= $padj AND
-                            ($id IS NULL OR g.experiment_id = $id)''',
+   
     
-    'get_gene': '''
-                    SELECT
-                            g.experiment_id,
-                            g.gene_symbol,
-                            g.ensembl_id,
-                            g.log2fc,
-                            g.logCPM,
-                            g.pvalue,
-                            g.padj,
-                            g.stat,
-                            g.other_info
-                        FROM gene_results g
-                        WHERE 
-                            ($id IS NULL OR g.experiment_id = $id) AND
-                                ($gene_symbol IS NULL OR g.gene_symbol = $gene_symbol) AND
-                            ($ensembl_id IS NULL OR g.ensembl_id = $ensembl_id)
-                            ''',
     'find_delete_experiment': '''
                         SELECT experiment_id FROM experimental_data
                         WHERE
@@ -282,7 +103,7 @@ CORE_QUERIES = {
     'delete_experiment': '''
                         DELETE FROM experimental_data
                         WHERE
-                            experiment_id = ANY($1)
+                            experiment_id = ANY($1) RETURNING *
                         ''',
                         
                        
@@ -337,29 +158,6 @@ CORE_QUERIES = {
                                     '''
     }
 
-gene_mapping = {'mouse_genes': '''
-            INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
-            SELECT 
-                UPPER(TRIM(csv_data.column03)) as symbol,
-                CAST(regexp_replace(csv_data.column00, '^MGI:', '', 'i') AS INTEGER) AS id, 
-                csv_data.column10 as ensembl_id,
-                NULL AS alias_symbol, 
-                NULL AS prev_symbol,
-                'mouse' as species 
-            FROM read_csv_auto('https://www.informatics.jax.org/downloads/reports/MGI_Gene_Model_Coord.rpt', strict_mode = false, delim = '\t', skip = 2) AS csv_data
-            ''',
-            'human_genes': '''
-            INSERT INTO genes (symbol, id, ensembl_id, alias_symbol, prev_symbol, species)
-            SELECT 
-                UPPER(TRIM(csv_data.symbol)) as symbol, 
-                CAST(regexp_replace(csv_data.hgnc_id, '^hgnc:', '', 'i') AS INTEGER) AS id, 
-                csv_data.ensembl_gene_id AS ensembl_id, 
-                string_split(UPPER(COALESCE(csv_data.alias_symbol, '')), '|') as alias_symbol, 
-                string_split(UPPER(COALESCE(csv_data.prev_symbol, '')), '|') as prev_symbol, 
-                'human' as species 
-            FROM read_csv_auto('https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt') AS csv_data
-            '''
-            }
 
 gene_columns = {
         'gene_symbol': [

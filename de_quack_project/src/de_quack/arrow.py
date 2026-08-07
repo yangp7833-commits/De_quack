@@ -12,13 +12,10 @@ import polars.selectors as cs
 from typing import Sequence, TypeAlias
 from .core import DeQuackling
 from .exceptions import DeQuackError, ProcessingError, DuplicateGeneTableError
-from .utilities import DE_ARROW_QUERIES, DE_ARROWS_QUERIES, ExperimentMetadata, gene_columns, gene_mapping, CORE_QUERIES
+from .utilities import ExperimentMetadata, gene_columns,  CORE_QUERIES
 
 
-_de_arrow_queries = DE_ARROW_QUERIES
-_de_arrows_queries = DE_ARROWS_QUERIES
 _core_queries = CORE_QUERIES
-_gene_mapping_queries = gene_mapping
 _GENE_ALIAS_TO_COLUMN = {
     alias.lower(): canonical
     for canonical, aliases in gene_columns.items()

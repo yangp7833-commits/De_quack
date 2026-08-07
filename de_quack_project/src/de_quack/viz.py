@@ -4,10 +4,6 @@ import os
 from .exceptions import ProcessingError
 from .arrow import DeArrow, DeArrows, _to_polars_table, _order_columns
 import polars as pl
-from .utilities import DE_ARROW_QUERIES
-
-
-_de_queries = DE_ARROW_QUERIES
 
 def volcano_plot(df, padj = 0.05, log2fc = 1, title=None, label_genes = 0, label_color = 'black', upregulated_color = 'red', downregulated_color = 'blue', insignificant_color = 'grey', label_size = 10, label_font = 'Courier New', label_rotation = 0, label_fontweight = 'bold', file = None, label_type = 'ensembl_id', show=False):
     try:
