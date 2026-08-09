@@ -165,8 +165,6 @@ class DeQuackling:
         """Create a normalized temporary view from the registered input data."""
         if columns is None:
             columns = {}
-        from duckdb import SQLExpression
-
         temp_view = self.conn.table('preprocessed_data')
         columns_info = [(column_name, _GENE_ALIAS_TO_COLUMN.get(column_name.lower())) for column_name in temp_view.columns]
         for key, value in columns.items():
@@ -435,6 +433,7 @@ class DeQuackling:
         if metadata is None:
             metadata = {}
         if kwargs:
+            # Check for typos in the kwargs keys
             parameters_and_keys = experiment_columns + ['metadata, columns, species']
             for key in kwargs.items():
                 if difflib.get_close_matches(key, parameters_and_keys, n=1, cutoff=0.8):
@@ -528,11 +527,6 @@ class DeQuackling:
         finally:
             self.conn.commit()
             
-            
-        
-        
-
-        
     
     def _polars_to_de_arrows(self, df: pl.DataFrame) -> "DeArrow | DeArrows":
         """Convert a Polars result frame into a `DeArrow` or `DeArrows` object."""

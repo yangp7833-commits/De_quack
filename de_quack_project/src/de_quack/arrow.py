@@ -324,7 +324,7 @@ class DeArrow:
             result = attr(*args, **kwargs)
             if isinstance(result, pl.DataFrame):
                 if result.columns == table.columns:
-                    return self.__class__._finalize_table(self, result)
+                    return DeArrows._finalize_table(self, result)
                 else:
                     raise DeQuackError('DeArrows object columns are immutable.')
             return result
@@ -450,7 +450,7 @@ class DeArrow:
 
         
     def df(self) -> pl.DataFrame:
-        return self._df.clone()
+        return self._table.clone()
 
 
 
@@ -850,6 +850,9 @@ class DeArrows:
         else:
             df, meta, new_ids = _add_experiment_data(self._table.clone(), meta, self.id, data, metadata, experiment_id)
         return DeArrows._from_arrow(df, meta, new_ids)
+    
+    def df(self) -> pl.DataFrame:
+        return self._table.clone()
     
 
 def _add_experiment_arrow(

@@ -5,52 +5,71 @@ from .exceptions import ProcessingError
 from .arrow import DeArrow, DeArrows, _to_polars_table, _order_columns
 import polars as pl
 
-def volcano_plot(df, padj = 0.05, log2fc = 1, title=None, label_genes = 0, label_color = 'black', upregulated_color = 'red', downregulated_color = 'blue', insignificant_color = 'grey', label_size = 10, label_font = 'Courier New', label_rotation = 0, label_fontweight = 'bold', file = None, label_type = 'ensembl_id', show=False):
+#replace all of the labeling variables with kwargs to make it more readable and easier to change
+def volcano_plot(df, padj = 0.05, log2fc = 1, title=None, show=False, label_genes = 0, label_type = 'ensembl_id', insignificant_color='grey', upregulated_color='red', downregulated_color='blue', **labeling_kwargs):
+    defaults = {
+        'color': 'black',
+        'fontsize': 10,
+        'rotation': 0,
+        'fontweight': 'normal',
+        'fontname': 'sans-serif',
+        'file': None
+        }
+    wrong_keys = [key for key in labeling_kwargs.keys() if key not in defaults.keys()]
+    if wrong_keys:
+        raise ValueError(f"Invalid arguments provided: {', '.join(wrong_keys)}. Valid arguments are: {', '.join(defaults.keys())}.")
+    for key in [k for k in defaults.keys() if k not in labeling_kwargs.keys()]:
+        labeling_kwargs[key] = defaults[key]
+    file = labeling_kwargs.pop('file', None)
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        raise ImportError('Matplotlib is required for volcano plotting. Please install is using "pip install matplotlib" or "pip install de_quack[plotting]"')
-    if not isinstance(df, (de_arrow, de_arrows)):
-        df = _to_polars_table(df)
-        df = _order_columns(df)
-    df = df.filter(pl.col('log2fc').is_not_null() & pl.col('padj').is_not_null())
-    df = df.filter(pl.col('padj') > 0)
-    upregulated_df = df.filter((pl.col('padj') < padj) & (pl.col('log2fc') > log2fc))
-    downregulated_df = df.filter((pl.col('padj') < padj) & (pl.col('log2fc') < -log2fc))
-    insignificant_df = df.filter((pl.col('padj') >= padj) | ((pl.col('log2fc') >= -log2fc) & (pl.col('log2fc') <= log2fc)))
-    plt.scatter(upregulated_df['log2fc'], -upregulated_df['padj'].log10(), color=upregulated_color, label='Upregulated', alpha=0.7)
-    plt.scatter(downregulated_df['log2fc'], -downregulated_df['padj'].log10(), color=downregulated_color, label='Downregulated', alpha=0.7)
-    plt.scatter(insignificant_df['log2fc'], -insignificant_df['padj'].log10(), color=insignificant_color, label='Insignificant', alpha=0.7)
+        raise ImportError('Matplotlib is required for volcano plotting. Please install it using "pip install matplotlib" or "pip install de_quack[plotting]"')
+    if not isinstance(df, (DeArrow, DeArrows)):
+        df_copy = _to_polars_table(df)
+        df_copy = _order_columns(df_copy)
+    else:
+        df_copy = df.df()
+    fig, ax = plt.subplots(figsize=(8, 6))
+    df_copy = df_copy.filter(pl.col('log2fc').is_not_null() & pl.col('padj').is_not_null())
+    df_copy = df_copy.filter(pl.col('padj') > 0)
+    upregulated_df = df_copy.filter((pl.col('padj') < padj) & (pl.col('log2fc') > log2fc))
+    downregulated_df = df_copy.filter((pl.col('padj') < padj) & (pl.col('log2fc') < -log2fc))
+    insignificant_df = df_copy.filter((pl.col('padj') >= padj) | ((pl.col('log2fc') >= -log2fc) & (pl.col('log2fc') <= log2fc)))
+    ax.scatter(upregulated_df['log2fc'], -upregulated_df['padj'].log10(), color=upregulated_color, label='Upregulated', alpha=0.7)
+    ax.scatter(downregulated_df['log2fc'], -downregulated_df['padj'].log10(), color=downregulated_color, label='Downregulated', alpha=0.7)
+    ax.scatter(insignificant_df['log2fc'], -insignificant_df['padj'].log10(), color=insignificant_color, label='Insignificant', alpha=0.7)
 
-    plt.xlabel('Log2FC')
-    plt.ylabel('-Log10(Padj)')
-    plt.title(title)
-    plt.legend()
+    ax.set_xlabel('Log2FC')
+    ax.set_ylabel('-Log10(Padj)')
+    ax.set_title(title)
+    ax.legend()
 
     if label_genes > 0:
         
-        if label_type in upregulated_df.columns:
+        if label_type in df_copy.columns:
             label_name = label_type
         else:
-            raise ValueError(f"Label column '{label_type}' not found in DataFrame columns.")
+            raise ValueError(f"Label column '{label_type}' not found in the provided DataFrame columns.")
 
-        top_regulated = upregulated_df.select(pl.col(label_name), pl.col('padj'), pl.col('log2fc').sort(descending=True)).limit(label_genes).to_dicts()
-        top_regulated += downregulated_df.select(pl.col(label_name), pl.col('padj'), pl.col('log2fc').sort(descending=False)).limit(label_genes).to_dicts()
+        top_regulated = upregulated_df.sort('log2fc', descending=True).select(pl.col(label_name), pl.col('padj'), pl.col('log2fc')).limit(label_genes).to_dicts()
+        top_regulated += downregulated_df.sort('log2fc', descending=False).select(pl.col(label_name), pl.col('padj'), pl.col('log2fc')).limit(label_genes).to_dicts()
+        import math
         for row in top_regulated:
             gene = row[label_name]
-            log2fc = row['log2fc']
-            padj = row['padj']
-            plt.text(log2fc + 0.01, -pl.col('padj').log(base=10) + 0.1, gene, fontsize=label_size, color=label_color, rotation=label_rotation, fontweight=label_fontweight, fontname=label_font)
+            gene_log2fc = row['log2fc']
+            gene_padj = row['padj']
+            ax.text(gene_log2fc + 0.01, -math.log10(gene_padj) + 0.1, gene, **labeling_kwargs)
        
 
     if file:
         if not os.path.exists(os.path.abspath(file)):
-            open(os.path.abspath(os.path.abspath(file)), 'a').close()
-        plt.savefig(file, bbox_inches='tight', dpi=300)
-    if show == True:
-        plt.show()
+            os.makedirs(os.path.dirname(os.path.abspath(file)), exist_ok=True)
+        fig.savefig(file, bbox_inches='tight', dpi=300)
+    if show:
+        fig.show()
     else:
-        return plt
+        return fig
         
     
 
