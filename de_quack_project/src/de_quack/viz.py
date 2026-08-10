@@ -5,8 +5,17 @@ from .exceptions import ProcessingError
 from .arrow import DeArrow, DeArrows, _to_polars_table, _order_columns
 import polars as pl
 
-#replace all of the labeling variables with kwargs to make it more readable and easier to change
-def volcano_plot(df, padj = 0.05, log2fc = 1, title=None, show=False, label_genes = 0, label_type = 'ensembl_id', insignificant_color='grey', upregulated_color='red', downregulated_color='blue', **labeling_kwargs):
+def volcano_plot(df: object, padj: float = 0.05, log2fc: float = 1, title=None, show=False, label_genes = 0, label_type = 'ensembl_id', insignificant_color='grey', upregulated_color='red', downregulated_color='blue', **labeling_kwargs) -> 'matplotlib.figure.Figure':
+    """ 
+        Make a volcano plot from a DeArrow or DeArrows or polars or pandas DataFrame. The DataFrame must contain the columns 'log2fc' and 'padj'.
+        The cutoffs for significance can be specified using the padj and log2fc parameters. The default values are 0.05 for padj and 1 for log2fc.
+        None-DeArrow objects will first be converted to a polars dataframe using DeArrow methods. The plot will show upregulated genes in red, downregulated genes in blue, and insignificant genes in grey. 
+        These can be customized using positional arguments.
+        The user can specify the number of top regulated genes to label on the plot, as well as the type of label to use (e.g., 'ensembl_id', 'gene_name', etc.). 
+        Additional labeling parameters can be passed as keyword arguments.
+        Uses matplotlib for plotting. If matplotlib is not installed, an ImportError will be raised with instructions to install it.
+
+    """
     defaults = {
         'color': 'black',
         'fontsize': 10,
@@ -46,7 +55,6 @@ def volcano_plot(df, padj = 0.05, log2fc = 1, title=None, show=False, label_gene
     ax.legend()
 
     if label_genes > 0:
-        
         if label_type in df_copy.columns:
             label_name = label_type
         else:

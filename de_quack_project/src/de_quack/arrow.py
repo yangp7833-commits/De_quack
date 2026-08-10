@@ -46,6 +46,11 @@ def _clean_df(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def _to_polars_table(table: object) -> pl.DataFrame:
+    """
+    Convert various table-like objects to a polars DataFrame.
+    Accepts polars DataFrames, polars LazyFrames, pandas DataFrames, file paths (CSV, TSV, Parquet), dictionaries, and lists of dictionaries.
+    Attempts imports as needed.
+    """
     if isinstance(table, pl.DataFrame):
         return table
     if isinstance(table, pl.LazyFrame):
@@ -82,13 +87,10 @@ def _to_polars_table(table: object) -> pl.DataFrame:
     return pl.DataFrame(table)
 
 
-def _check_columns(required_columns: set[str], columns: Sequence[str]) -> None:
-    missing_columns = required_columns - set(columns)
-    if missing_columns:
-        raise DeQuackError(f'De_arrow object is missing {missing_columns} for this function')
-
-
 def _check_ids(ids: Sequence[ExperimentId]) -> None:
+    """ 
+    Ensures that the provided list of IDs is valid. Raises an error if any ID occurs multiple times or if any ID is a string.
+    """
     for item in ids:
         if ids.count(item) > 1:
             raise DeQuackError(f'id {item} occurs multiple times in object ids')
@@ -101,17 +103,28 @@ def _get_experiment_attribute(
     field: str,
     ids: ExperimentId | Sequence[ExperimentId],
 ) -> dict[ExperimentId, ExperimentMetadataField | None]:
+    """
+    Used for getting experiment attributes from the metadata dictionary. Returns a dictionary of {id: attribute} for each id in the provided list.
+    Used in __init__ and _from_arrow calls.
+    """
     if isinstance(ids, list):
         return {item: metadata.get(item, {}).get(field) for item in ids}
     return {ids: metadata.get(ids, {}).get(field)}
 
 
 def _get_gene_table(species: str) -> object:
+    """
+    Retrieves the path of the gene table for the specified species.
+    """
     folder = resources.files('de_quack') / 'gene_tables'
     return folder / f'{species}_genes.parquet'
 
 
 def _heal_genes(df: pl.DataFrame, species: str) -> pl.DataFrame:
+    """
+    Heal gene symbols and Ensembl IDs in the provided DataFrame using the specefied gene table.
+    Done with polars joining. If experiment id is present (as in DeArrows initiation), the column will be included in the select statement.
+    """
     exp_id = 'experiment_id' in df.columns
     df = df.lazy()
     genes = pl.scan_parquet(_get_gene_table(species)).select('symbol', 'ensembl_id')
@@ -136,6 +149,12 @@ def _heal_genes(df: pl.DataFrame, species: str) -> pl.DataFrame:
 
 
 def _order_columns(df: object, columns: dict[str, str] | None = None) -> pl.DataFrame:
+    """
+    Orders the columns of the provided DataFrame according to the expected gene columns and any additional columns.
+    If the provided DataFrame is missing any of the expected gene columns, those columns will be added with null values.
+    If the provided DataFrame has additional columns, those columns will be added to the end of the DataFrame in the order they appear in the provided DataFrame.
+    If BaseMean is detected, it will be converted to logCPM and added to the DataFrame. THe original basemean will be kept in the additional information.
+    """
     if columns is None:
         columns = {}
     df = _to_polars_table(df)
@@ -209,6 +228,26 @@ class DeArrow:
         columns: dict[str, str] | None = None,
         **fields: ExperimentMetadataField,
     ) -> None:
+    """
+    Initialize a DeArrow object with the provided data and metadata.
+    Parameters
+    ----------
+    info : object
+        A table-like object containing gene expression data. Can be a polars DataFrame, polars LazyFrame, pandas DataFrame, file path (CSV, TSV, Parquet), dictionary, or list of dictionaries.
+    experiment_id : ExperimentId, optional
+        An integer ID for the experiment. If not provided, defaults to 1.
+    metadata : ExperimentMetadataRecord, optional
+        A dictionary containing metadata for the experiment. If not provided, metadata can be provided as keyword arguments.
+    heal_genes : bool, optional
+        If True, attempts to heal gene identifiers. Defaults to False.
+    species : str, optional
+        The species of the gene data. Defaults to 'human'.
+    columns : dict[str, str], optional
+        A dictionary mapping column names to their expected types.
+    **fields : ExperimentMetadataField
+        Additional metadata fields as keyword arguments.
+    Raises if no metadata is provided or if it is not a dictionary.
+    """
         if columns is None:
             columns = {}
         if metadata is None:
@@ -240,6 +279,10 @@ class DeArrow:
         heal_genes: bool = False,
         species: str | None = None,
     ) -> tuple[pl.DataFrame, ExperimentMetadataMap]:
+        """
+        Convert a table-like object and metadata into a DeArrow-compatible polars DataFrame and metadata map.
+        First converts metadata into an ExperimentMetadata object, then converts the table-like object into a polars DataFrame, orders the columns, heals gene identifiers if specified, and returns the cleaned DataFrame along with the metadata map.
+        """
         df = _to_polars_table(info)
         metadata_fields, other_info=ExperimentMetadata().to_dict(metadata, info)
         for key, value in json.loads(other_info).items():
@@ -315,6 +358,12 @@ class DeArrow:
     
 
     def __getattr__(self, name: str) -> object:
+        """
+        Override the default attribute access to delegate to the underlying polars DataFrame.
+        Will intercept method calls and return a new DeArrow object if the result is a polars DataFrame. With columns preserved.
+        If a polars dataframe is returned and the columns are different, an error will be raised to prevent metadata loss.
+        If the result is not a polars DataFrame, it will be returned as is along with the experiment metadata.
+        """
         table = object.__getattribute__(self, '_table')
         attr = getattr(table, name)
         if not callable(attr):
@@ -327,7 +376,7 @@ class DeArrow:
                     return DeArrows._finalize_table(self, result)
                 else:
                     raise DeQuackError('DeArrows object columns are immutable.')
-            return result
+            return result, self.experiment_metadata
 
         return wrapper
 
@@ -336,8 +385,9 @@ class DeArrow:
 
     
     def get_significant_genes(self, log2fc: float = 1, pvalue: float = 0.05, logCPM: float = 0) -> "DeArrow":
-        required_columns = {'log2fc', 'pvalue', 'logCPM'}
-        _check_columns(required_columns, self.columns)
+        """
+        Gets all significant genes from the DeArrow object based on the provided log2fc, pvalue, and logCPM thresholds.
+        """
         df = self._table.filter(
             (pl.col('log2fc').abs() >= log2fc) &
             (pl.col('pvalue') <= pvalue) &
@@ -346,8 +396,9 @@ class DeArrow:
         return self._from_arrow(df, self.experiment_metadata, self.id)
 
     def get_downregulated(self, log2fc: float = 0, pvalue: float = 0.05, logCPM: float = 0) -> "DeArrow":
-        required_columns = {'log2fc', 'pvalue', 'logCPM'}
-        _check_columns(required_columns, self.columns)
+        """
+        Gets all downregulated genes from the DeArrow object based on the provided log2fc, pvalue, and logCPM thresholds.
+        """
         df = self._table.filter(
             (pl.col('log2fc') <= log2fc) &
             (pl.col('pvalue') <= pvalue) &
@@ -356,8 +407,9 @@ class DeArrow:
         return self._from_arrow(df, self.experiment_metadata, self.id)
 
     def get_upregulated(self, log2fc: float = 0, pvalue: float = 0.05, logCPM: float = 0) -> "DeArrow":
-        required_columns = {'log2fc', 'pvalue', 'logCPM'}
-        _check_columns(required_columns, self.columns)
+        """
+        Gets all upregulated genes from the DeArrow object based on the provided log2fc, pvalue, and logCPM thresholds.
+        """
         frame = self._table.filter(
             (pl.col('log2fc') >= log2fc) &
             (pl.col('pvalue') <= pvalue) &
@@ -366,6 +418,9 @@ class DeArrow:
         return self._from_arrow(frame, self.experiment_metadata, self.id)
 
     def set_id(self, experiment_id: ExperimentId) -> "DeArrow":
+        """
+        Set the ID of the DeArrow object. Will change the dataframe as well as the metadata and attributes.
+        """
         if isinstance(experiment_id, int):
             frame = self._table.with_columns(pl.lit(experiment_id).alias('experiment_id'))
             metadata = {experiment_id: self.experiment_metadata[self.id]}
@@ -379,8 +434,9 @@ class DeArrow:
         ensembl_id: str | None = None,
         experiment_id: ExperimentId | None = None,
     ) -> "DeArrow":
-        required_columns = {'gene_symbol', 'ensembl_id'}
-        _check_columns(required_columns, self.columns)
+        """
+        Get a specific gene from the DeArrow object by gene symbol or Ensembl ID. If an experiment ID is provided, the gene will be filtered by that experiment ID as well.
+        """
         expression = pl.lit(True)
         if experiment_id is not None and 'experiment_id' in self.columns:
             expression = expression & (pl.col('experiment_id') == experiment_id)
@@ -399,6 +455,11 @@ class DeArrow:
         experiment_id: ExperimentId | None = None,
         **fields: ExperimentMetadataField,
     ) -> "DeArrows":
+        """
+        Add a new experiment to the DeArrow object. The new experiment can be provided as a DeArrow, DeArrows, or a polars or pandas DataFrame or a file path. The metadata for the new experiment can be provided as a dictionary or as keyword arguments. If no metadata is provided, the metadata from the existing DeArrow object will be used. 
+        The new experiment will be added to the existing DeArrow object and a new DeArrows object will be returned.
+        Uses functions outside of the class.
+        """
 
         ids = [self.id]
         if metadata is None and fields:
@@ -414,8 +475,6 @@ class DeArrow:
 
     
     def insert(self, file: str, initialize_gene_table: bool = False, species: str | None = None) -> None:
-        required_columns = {'padj', 'pvalue', 'log2fc', 'gene_symbol', 'ensembl_id', 'logCPM', 'stat', 'other_info', 'experiment_id'}
-        _check_columns(required_columns, self.columns)
         if not isinstance(file, str):
             raise TypeError(f'file must be a string, not {type(file)}')
         if not os.path.exists(os.path.abspath(file)):
@@ -465,6 +524,9 @@ class DeArrows:
         heal_genes: bool = False,
         species: str = 'human',
     ) -> object:
+        """
+        Checks if there are multiple metadata and provided tables. If there is only one metadata and one table, it will return a DeArrow object instead of a DeArrows object.
+        """
         if columns is None:
             columns = {}
         if metadata is None:
@@ -496,6 +558,18 @@ class DeArrows:
             Variable length argument list of table references (file paths or identifiers)
         metadata : list of dict
             List of metadata dictionaries, one for each table.
+        ids : list of int, optional
+            List of unique identifiers for each table. If not provided, will be generated automatically.
+        heal_genes : bool, optional
+            Whether to heal gene symbols and Ensembl IDs using the species-specific gene table. Default is
+        columns: dict, optional
+            A dictionary mapping column names in the input tables to the expected column names in the DeArrows object. Default is None.
+            Use this if your input table has different columns than the implemented ones.
+        keep_ids : bool, optional
+            Whether to keep the ids in provided DeArrow objects. If False, new ids will be expected to be provided for DeArrow objects.
+            If no ids are provided, new ids will be generated automatically. Default is False.
+        species : str, optional
+            The species to use for gene healing. Default is 'human'. If heal_genes is True, this parameter is required to specify the species for gene healing. If heal_genes is False, this parameter is ignored.
         """
 
         
@@ -543,6 +617,12 @@ class DeArrows:
 
     
     def __getattr__(self, name: str) -> object:
+        """
+        Override the default attribute access to delegate to the underlying polars DataFrame.
+        Will intercept method calls and return a new DeArrows object if the result is a polars DataFrame. With columns preserved.
+        If a polars dataframe is returned but the columns are different, an error will be raised.
+        This is done to ensure that metadata isn't accidentally dropped when performing operations on the underlying DataFrame.
+        """
         table = object.__getattribute__(self, '_table')
         attr = getattr(table, name)
         if not callable(attr):
@@ -555,7 +635,7 @@ class DeArrows:
                     return self.__class__._finalize_table(self, result)
                 else:
                     raise DeQuackError('DeArrows object columns are immutable.')
-            return result
+            return result, self.experiment_metadata
 
         return wrapper
     
@@ -639,6 +719,10 @@ class DeArrows:
         metadata: ExperimentMetadataMap,
         ids: list[ExperimentId],
     ) -> "DeArrows":
+
+    """ 
+    Wrap a polars Dataframe back into a DeArrows object with the provided metadata and ids.
+    """
         instance = object.__new__(cls)
         instance._table = table
         instance.experiment_metadata = metadata
@@ -652,6 +736,7 @@ class DeArrows:
         return instance
 
     def set_id(self, ids: dict[ExperimentId, ExperimentId] | list[ExperimentId]) -> "DeArrows":
+        """Set the IDs of the experiments in the DeArrows object."""
         if isinstance(ids, dict):
             return self._set_id_dict(ids)
         elif isinstance(ids, list):
@@ -696,6 +781,12 @@ class DeArrows:
         contrast: str | list[str] | None = None,
         file: str | list[str] | None = None,
     ) -> "DeArrow | DeArrows":
+        """
+        Gets experiments from the DeArrows object based on the provided metadata. If no metadata is provided, all experiments will be returned. If multiple experiments are found, a DeArrows object will be returned. 
+        If only one experiment is found, a DeArrow object will be returned.
+        Uses the attributes from experiment metadata and gets the id to filter the dataframe. If no experiments are found, an error will be raised.
+        """
+        
 
         selected_ids = set(self.id)
         if experiment_id is not None:
@@ -735,6 +826,11 @@ class DeArrows:
         return self._finalize_table(frame)
     
     def _finalize_table(self, df: pl.DataFrame) -> "DeArrow | DeArrows":
+        """
+        Selects all unique experiment IDs from the provided DataFrame and retrieves the corresponding metadata. If no experiment IDs are found, a DeArrow object is returned with no ID. If one experiment ID is found, a DeArrow object is returned with that ID. 
+        If multiple experiment IDs are found, a DeArrows object is returned with those IDs.
+        Also changes the metadata and attributes of the returned object to match the experiment IDs.
+        """
         df_ids = df.select('experiment_id').unique().to_series().to_list() if 'experiment_id' in df.columns else []
         metadata = {}
         for experiment_id in df_ids:
@@ -746,8 +842,6 @@ class DeArrows:
         return self._from_arrow(df, metadata, df_ids)
     
     def get_significant_genes(self, log2fc: float = 1, padj: float = 0.05, logCPM: float = 0) -> "DeArrows":
-        required_columns = {'log2fc', 'pvalue', 'logCPM'}
-        _check_columns(required_columns, self.columns)
         df = self._table.filter(
             (pl.col('log2fc').abs() >= log2fc) &
             (pl.col('padj') <= padj) &
@@ -756,8 +850,6 @@ class DeArrows:
         return self._finalize_table(df)
 
     def get_downregulated(self, log2fc: float = -1, padj: float = 0.05, logCPM: float = 1) -> "DeArrows":
-        required_columns = {'log2fc', 'pvalue', 'logCPM'}
-        _check_columns(required_columns, self.columns)
         df = self._table.filter(
             (pl.col('log2fc') <= log2fc) &
             (pl.col('padj') <= padj) &
@@ -766,8 +858,6 @@ class DeArrows:
         return self._finalize_table(df)
 
     def get_upregulated(self, log2fc: float = 1, padj: float = 0.05, logCPM: float = 1) -> "DeArrows":
-        required_columns = {'log2fc', 'pvalue', 'logCPM'}
-        _check_columns(required_columns, self.columns)
         df = self._table.filter(
             (pl.col('log2fc') >= log2fc) &
             (pl.col('padj') <= padj) &
@@ -781,8 +871,6 @@ class DeArrows:
         ensembl_id: str | None = None,
         experiment_id: ExperimentId | None = None,
     ) -> "DeArrows":
-        required_columns = {'gene_symbol', 'ensembl_id'}
-        _check_columns(required_columns, self.columns)
         expression = pl.lit(True)
         if experiment_id is not None and 'experiment_id' in self.columns:
             expression = expression & (pl.col('experiment_id') == experiment_id)
@@ -795,8 +883,14 @@ class DeArrows:
         
     
     def insert(self, file: str, initialize_gene_table: bool = False, species: str | None = None) -> None:
-        required_columns = {'padj', 'pvalue', 'log2fc', 'gene_symbol', 'ensembl_id', 'logCPM', 'stat', 'other_info', 'experiment_id'}
-        _check_columns(required_columns, self.columns)
+        """
+        Inserts the dataframe into a DuckDB file. If the file does not exist, it will be created. If the file exists, the dataframe will be appended to the existing data. If initialize_gene_table is True, a gene table will be created in the database for the specified species. 
+        If the gene table already exists, an error will be raised. The species parameter is required if initialize_gene_table is True.
+        Replaces empty strings in gene_symbol and ensembl_id columns with None to avoid issues with the database. Also calculates a data signature for the dataframe to ensure data integrity.
+        Loops through all IDs and inserts them as experiments first. Then, retrieves new IDs generated from the database primary key sequence and creates an id_map for insertion of the table.
+        A join will be performed on the id_map to replace old IDs with new IDs in the dataframe before insertion into the database. Finally, the dataframe will be inserted into the database and the connection will be closed.
+        IDs in the DeArrows object will not be preserved, as there is a primary key constraint on all de_quack files.
+        """
         if not isinstance(file, str):
             raise TypeError(f'file must be a string, not {type(file)}')
         if not os.path.exists(os.path.abspath(file)):
@@ -840,6 +934,11 @@ class DeArrows:
         experiment_id: ExperimentId | None = None,
         **fields: ExperimentMetadataField,
     ) -> "DeArrows":
+        """
+        Add a new experiment to the DeArrows object. The new experiment can be provided as a DeArrow, DeArrows, or a polars or pandas DataFrame or a file path. The metadata for the new experiment can be provided as a dictionary or as keyword arguments. If no metadata is provided, the metadata from the existing DeArrows object will be used.
+        The new experiment will be added to the existing DeArrows object and a new DeArrows object will be returned.
+        Uses functions outside of the class.
+        """
         meta = dict(self.experiment_metadata)
         if metadata is not None and fields:
             metadata.update(fields)
