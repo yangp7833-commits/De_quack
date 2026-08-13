@@ -30,7 +30,7 @@ from .utilities import gene_columns, ExperimentMetadata, CORE_QUERIES, _setup_lo
 import time
 import importlib
 core_queries = CORE_QUERIES
-experiment_columns=['experiment_id', 'model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization', 'extra_info']
+experiment_columns=['experiment_id', 'model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization', 'other_info']
 
 ExperimentId: TypeAlias = int | str
 ExperimentMetadataField: TypeAlias = str | int | float | bool | None | dict[str, object] | list[object]
@@ -162,7 +162,12 @@ class DeQuackling:
         
 
     def _create_temp_view(self, columns: dict[str, str] | None = None) -> duckdb.DuckDBPyRelation:
-        """Create a normalized temporary view from the registered input data."""
+        """Create a normalized temporary view from the registered input data.
+            Uses a mix of provided column mappings (if any) and the default gene columns found in utilities.gene_columns. Raises ProcessingError if no recognizable gene columns are found.
+            Returns the view as a relation to use in the insert query. On the event that basemean is detected, it will be used to compute logCPM if logCPM is not present.
+            Basemean will then be added to the view as a column, but will be in the extra columns section of the other_info JSON column.
+            If an ambiguous gene name is detected (eg. a column that could be symbol or Ensembl ID), it will be treated as a symbol unless the data is detected to be Ensembl IDs (eg. starts with ENS).
+            """
         if columns is None:
             columns = {}
         temp_view = self.conn.table('preprocessed_data')
@@ -244,13 +249,15 @@ class DeQuackling:
 
 
     def _preprocess(self, info: object) -> None:
-        """Register an input file or table-like object as `preprocessed_data`."""
+        """Register an input file or table-like object as `preprocessed_data`.
+            Supports CSV, TSV, Parquet, DuckDB relation, Polars DataFrame, Pandas DataFrame, DeArrow, or DeArrows.
+        """
 
         if isinstance(info, str) and os.path.isfile(os.path.abspath(info)):
             info=os.path.abspath(info)
             if info.lower().endswith('.parquet'):
                 self.conn.execute('DROP VIEW IF EXISTS preprocessed_data')
-                self.conn.read_parquet(info, header=True).create_view('preprocessed_data')
+                self.conn.read_parquet(info).create_view('preprocessed_data')
                 return
             else:
                 self.conn.execute('DROP VIEW IF EXISTS preprocessed_data')
@@ -362,9 +369,49 @@ class DeQuackling:
         self.conn.commit()
         
         return result[0][0]
+    
+    def write_parquet(self, experiment_id: ExperimentId | None | list[ExperimentId], output_path: str) -> None:
+        """Write gene results and experiment metadata to a Parquet file for external use.
+        Args:
+            output_path: Path to write the Parquet file.
+            experiment_id: Optional experiment_id to filter the results. If None, all experiments are written.
+        """
+        logger.info(f"Writing gene results and experiment metadata to {output_path}.")
+
+        if len(os.path.dirname(output_path)) > 0:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        output_path = os.path.abspath(output_path)
+        if experiment_id is None:
+            self.conn.execute(f"COPY (SELECT * FROM gene_results) TO '{output_path}' (FORMAT PARQUET)")
+            metadata = self.conn.execute(f"SELECT * FROM experimental_data").fetchall()
+            experiment_id = [n for n in range(1, len(metadata)+1)]
+        elif isinstance(experiment_id, list):
+            try:
+                for i in range(len(experiment_id)):
+                    experiment_id[i] = int(experiment_id[i])
+            except ValueError:
+                raise ValueError("All experiment IDs must be integers.")
+            self.conn.execute(f"COPY (SELECT * FROM gene_results WHERE experiment_id = ANY($1)) TO '{output_path}' (FORMAT PARQUET)", (experiment_id,))
+            metadata = self.conn.execute(f"SELECT * FROM experimental_data WHERE experiment_id = ANY($1)", (experiment_id,)).fetchall()
+        else:
+            try:
+                experiment_id = int(experiment_id)
+            except ValueError:
+                raise ValueError("Experiment ID must be an integer.")
+            self.conn.execute(f"COPY (SELECT * FROM gene_results WHERE experiment_id = $1) TO '{output_path}' (FORMAT PARQUET)", (experiment_id,))
+            metadata = self.conn.execute(f"SELECT * FROM experimental_data WHERE experiment_id = $1", (experiment_id,)).fetchall()
+            experiment_id = list(experiment_id)  # Convert to list for consistency
+        meta_list = [dict(zip(experiment_columns, row)) for row in metadata]
+        meta_dict = _to_metadata(meta_list)
+        meta_json = json.dumps(meta_dict, indent=4)
+        meta_path = os.path.splitext(output_path)[0] + '_metadata.json'
+        with open(meta_path, 'w') as f:
+            f.write(meta_json)
+        logger.info(f'Gene results written to {output_path}.')
+        logger.info(f'Experiment metadata written to {meta_path}.')
 
     def _insert_gene_results(self, experiment_id: ExperimentId, view: duckdb.DuckDBPyRelation, species: str | None = None) -> None:
-        """Insert normalized gene-result rows for one experiment."""
+        """Insert normalized gene-result rows for one experiment. Uses second query to get unmatched genes and log a warning if any are found."""
 
 
 
@@ -544,7 +591,7 @@ class DeQuackling:
                 contrast,
                 annotation_version,
                 normalization,
-                other_info AS extra_info
+                other_info
             FROM experimental_data
             WHERE experiment_id = ANY(?)
             ''',
@@ -574,6 +621,7 @@ class DeQuackling:
 
     
 def _get_de_arrows(arrows: object, metadata: ExperimentMetadataMap, ids: list[ExperimentId]) -> "DeArrow | DeArrows":
+    """ Imports arrow at the function level to avoid circular import issues. Returns a DeArrow or DeArrows object based on the number of experiment ids."""
     from .arrow import DeArrow, DeArrows
     if len(ids) < 2:
         return DeArrow._from_arrow(arrows, metadata, ids)

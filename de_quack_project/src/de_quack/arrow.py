@@ -8,11 +8,11 @@ import importlib
 import hashlib
 import duckdb
 import polars as pl
-import polars.selectors as cs
 from typing import Sequence, TypeAlias
 from .core import DeQuackling
 from .exceptions import DeQuackError, ProcessingError, DuplicateGeneTableError
-from .utilities import ExperimentMetadata, gene_columns,  CORE_QUERIES
+from .utilities import ExperimentMetadata, gene_columns,  CORE_QUERIES, _setup_logger
+logger = _setup_logger()
 
 
 _core_queries = CORE_QUERIES
@@ -145,7 +145,9 @@ def _heal_genes(df: pl.DataFrame, species: str) -> pl.DataFrame:
             pl.coalesce(['ensembl_id', 'ensembl_id_on_symbol']).alias('ensembl_id'),
             pl.all().exclude(['symbol', 'ensembl_id_on_symbol', 'gene_symbol', 'ensembl_id', 'experiment_id'])
         ).collect()
-    return df
+    unmatched_count = df.filter((pl.col('gene_symbol') == '') & (pl.col('ensembl_id') == '')).height
+    if unmatched_count > 0:
+        logger.warning(f'{unmatched_count} genes could not be matched to the {species} gene table.')
 
 
 def _order_columns(df: object, columns: dict[str, str] | None = None) -> pl.DataFrame:
@@ -228,26 +230,27 @@ class DeArrow:
         columns: dict[str, str] | None = None,
         **fields: ExperimentMetadataField,
     ) -> None:
-    """
-    Initialize a DeArrow object with the provided data and metadata.
-    Parameters
-    ----------
-    info : object
-        A table-like object containing gene expression data. Can be a polars DataFrame, polars LazyFrame, pandas DataFrame, file path (CSV, TSV, Parquet), dictionary, or list of dictionaries.
-    experiment_id : ExperimentId, optional
-        An integer ID for the experiment. If not provided, defaults to 1.
-    metadata : ExperimentMetadataRecord, optional
-        A dictionary containing metadata for the experiment. If not provided, metadata can be provided as keyword arguments.
-    heal_genes : bool, optional
+        """
+        Initialize a DeArrow object with the provided data and metadata.
+        Parameters
+        ----------
+        info : object
+            A table-like object containing gene expression data. Can be a polars DataFrame, polars LazyFrame, pandas DataFrame, file path (CSV, TSV, Parquet), dictionary, or list of dictionaries.
+            The object should have columns for gene identifiers and expression values.
+        experiment_id : ExperimentId, optional
+            An integer ID for the experiment. If not provided, defaults to 1.
+        metadata : ExperimentMetadataRecord, optional
+            A dictionary containing metadata for the experiment. If not provided, metadata can be provided as keyword arguments.
+        heal_genes : bool, optional
         If True, attempts to heal gene identifiers. Defaults to False.
-    species : str, optional
-        The species of the gene data. Defaults to 'human'.
-    columns : dict[str, str], optional
-        A dictionary mapping column names to their expected types.
-    **fields : ExperimentMetadataField
-        Additional metadata fields as keyword arguments.
-    Raises if no metadata is provided or if it is not a dictionary.
-    """
+        species : str, optional
+            The species of the gene data. Defaults to 'human'.
+        columns : dict[str, str], optional
+            A dictionary mapping column names to their expected types.
+        **fields : ExperimentMetadataField
+            Additional metadata fields as keyword arguments.
+        Raises if no metadata is provided or if it is not a dictionary.
+        """
         if columns is None:
             columns = {}
         if metadata is None:
@@ -720,9 +723,9 @@ class DeArrows:
         ids: list[ExperimentId],
     ) -> "DeArrows":
 
-    """ 
-    Wrap a polars Dataframe back into a DeArrows object with the provided metadata and ids.
-    """
+        """ 
+        Wrap a polars Dataframe back into a DeArrows object with the provided metadata and ids.
+        """
         instance = object.__new__(cls)
         instance._table = table
         instance.experiment_metadata = metadata

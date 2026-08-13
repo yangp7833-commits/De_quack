@@ -13,7 +13,6 @@ class TestArrow():
     
     def test_arrows_creation(self):
         arrows = DeArrows('data.txt', 'data1.txt', heal_genes = True, species = 'human', metadata = [{'experiment_name1': 'Test Experiment'}, {'experiment_name': 'Test Experiment 2'}])
-        print(arrows)
         arrows_with_ids = DeArrows(arrows, 'data.txt', metadata = {'experiment_name': 'Test Experiment 2'}, ids = [3], keep_ids = True)
         assert arrows._table.height > 0
         assert arrows.get_gene('AKT1').height > 0 and arrows.get_gene(ensembl_id = 'ENSMUSG00000000017').height > 0

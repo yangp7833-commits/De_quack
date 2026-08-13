@@ -2,6 +2,8 @@ from de_quack import DeQuackling
 import os
 
 class TestCore():
+        
+
     def test_ingestion(self):
         with DeQuackling() as db:
             db.initialize_gene_table('human')
@@ -17,6 +19,14 @@ class TestCore():
             assert db.get_significant_genes().height == 37
             assert db.get_experiment(name = 'Test Experiment').height > 0 
     
+    def test_create_parquet(self):
+        with DeQuackling() as db:
+            db.write_parquet(output_path = 'genes.parquet', experiment_id = [1, 2])
+            assert os.path.exists('genes.parquet')
+            assert os.path.exists('genes_metadata.json')
+            db.ingest('genes.parquet', metadata = {'experiment_name': 'Test Experiment 3', 'description': 'This is a test experiment.'})
+            assert db.get_experiment(name = 'Test Experiment 3').height > 0
+    
     def test_remove(self):
         with DeQuackling() as db:
             db.delete_experiment(name = 'Test Experiment')
@@ -27,6 +37,8 @@ class TestCore():
             
     def test_cleanup(self):
         os.remove('SQL.duckdb')
+        os.remove('genes.parquet')
+        os.remove('genes_metadata.json')
 
     
     
