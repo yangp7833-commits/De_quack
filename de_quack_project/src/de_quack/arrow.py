@@ -148,6 +148,7 @@ def _heal_genes(df: pl.DataFrame, species: str) -> pl.DataFrame:
     unmatched_count = df.filter((pl.col('gene_symbol') == '') & (pl.col('ensembl_id') == '')).height
     if unmatched_count > 0:
         logger.warning(f'{unmatched_count} genes could not be matched to the {species} gene table.')
+    return df
 
 
 def _order_columns(df: object, columns: dict[str, str] | None = None) -> pl.DataFrame:
@@ -296,6 +297,8 @@ class DeArrow:
             if species is None:
                 species = 'human'
             df = _heal_genes(df, species)
+        if 'experiment_id' in df.columns:
+            df = df.drop('experiment_id')
         df = df.insert_column(0, pl.lit(experiment_id).alias('experiment_id'))
        
         return _clean_df(df), metadata_fields
@@ -513,7 +516,12 @@ class DeArrow:
         
     def df(self) -> pl.DataFrame:
         return self._table.clone()
-
+    
+    def write_parquet(self, output_path: str, compression: str = 'zstd', compression_level: int = 3) -> None:
+        """
+        Calls the _write_parquet function to write the DeArrow object to parquet.
+        """
+        _write_parquet(self._table, self.experiment_metadata, output_path, compression=compression, compression_level=compression_level)
 
 
 class DeArrows:
@@ -573,6 +581,9 @@ class DeArrows:
             If no ids are provided, new ids will be generated automatically. Default is False.
         species : str, optional
             The species to use for gene healing. Default is 'human'. If heal_genes is True, this parameter is required to specify the species for gene healing. If heal_genes is False, this parameter is ignored.
+        
+        If a provided table already has an experiment_id column and it is NOT a DeArrow or DeArrows object, the id will be discarded. This is because maintaing equal lengths between the id and tables with keep_ids on is not possible when the id is already present in the table. 
+        If you want to keep the id, please provide a DeArrow or DeArrows object instead of a table with an experiment_id column.
         """
 
         
@@ -699,6 +710,8 @@ class DeArrows:
                 new_id = next(ids_iter)
                 arg = _to_polars_table(arg)
                 arg = _order_columns(arg, columns)
+                if 'experiment_id' in arg.columns:
+                    arg = arg.drop('experiment_id')
                 arg = arg.insert_column(0, pl.lit(new_id).alias('experiment_id'))
                 flat_ids.append(new_id)
                 meta = next(meta_iter)
@@ -956,6 +969,13 @@ class DeArrows:
     def df(self) -> pl.DataFrame:
         return self._table.clone()
     
+    def write_parquet(self, output_path: str, experiment_id: ExperimentId | None | list[ExperimentId] = None, compression: str = 'zstd', compression_level: int = 3) -> None:
+        """
+        Calls the _write_parquet function to write the DeArrows object to parquet.
+        """
+        experiment_id = [experiment_id] if isinstance(experiment_id, int) else experiment_id
+        table = self._table.filter(pl.col('experiment_id').is_in(experiment_id)) if experiment_id is not None else self._table
+        _write_parquet(table, self.experiment_metadata, output_path, compression=compression, compression_level=compression_level)
 
 def _add_experiment_arrow(
     df: pl.DataFrame,
@@ -1026,9 +1046,33 @@ def _add_experiment_data(
     new_ids = ids + [experiment_id]
     meta.update(new_metadata)
     return (df, meta, new_ids)
-    
 
+   
     
+def _write_parquet(
+    df: pl.DataFrame,
+    metadata: ExperimentMetadataMap,
+    output_path: str,
+    compression: str = 'ztsd',
+    compression_level: int = 3
+) -> None:
+    """
+    Write the DeArrows object to a parquet file. The metadata will be written to a separate json file with the same name as the parquet file.
+    This will be called by the write_parquet method of the DeArrows object. Will write the dataframe to a parquet file and the metadata to a json file with the same name as the parquet file.
+    """
+    if not isinstance(output_path, str):
+        raise TypeError(f'output_path must be a string, not {type(output_path)}')
+    if not output_path.endswith('.parquet'):
+        raise ValueError(f'output_path must end with .parquet, not {output_path}')
+    print(df)
+    df.write_parquet(output_path, compression=compression, compression_level=compression_level)
+    metadata_path = output_path.replace('.parquet', '_metadata.json')
+    if len(os.path.dirname(metadata_path)) > 0:
+        if not os.path.exists(os.path.dirname(metadata_path)):
+            os.makedirs(os.path.dirname(metadata_path))
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=4)
+    logger.info(f'Wrote DeArrows object to {output_path} and metadata to {metadata_path}')
 
 
 

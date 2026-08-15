@@ -370,7 +370,7 @@ class DeQuackling:
         
         return result[0][0]
     
-    def write_parquet(self, experiment_id: ExperimentId | None | list[ExperimentId], output_path: str) -> None:
+    def write_parquet(self, output_path: str, experiment_id: ExperimentId | None | list[ExperimentId] = None) -> None:
         """Write gene results and experiment metadata to a Parquet file for external use.
         Args:
             output_path: Path to write the Parquet file.

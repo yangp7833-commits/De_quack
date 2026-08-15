@@ -49,6 +49,15 @@ class TestArrow():
             arrow.insert('SQL.duckdb')
             assert db.get_gene().height > 0
             assert db.get_upregulated().height > 0
+    
+    def test_write_parquet(self):
+        arrow = DeArrow('data.txt', metadata = {'experiment_name': 'Test Experiment'}, heal_genes = True)
+        arrows = arrow.add_experiment('data1.txt', metadata = {'experiment_name': 'Test Experiment 2'}, experiment_id = 3)
+        arrows.write_parquet(output_path = 'genes.parquet', experiment_id = 1, compression = 'zstd', compression_level = 3)
+        assert os.path.exists('genes.parquet')
+        assert os.path.exists('genes_metadata.json')
+        arrow_parquet = DeArrow('genes.parquet', metadata = {'experiment_name': 'Test Experiment 3'})
+        assert arrow_parquet.height > 0
         
     def test_arrow_cleanup(self):
         os.remove('SQL.duckdb')

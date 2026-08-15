@@ -1,0 +1,20 @@
+{
+    "1": {
+        "experiment_name": "Test Experiment",
+        "date": "2026-05-20",
+        "contrast": "unknown",
+        "file": "/workspaces/SPARTA-pipelining-SQL/de_quack_project/test_and_examples/data.txt",
+        "normalization": "unknown",
+        "model": "unknown",
+        "annotation_version": "unknown"
+    },
+    "3": {
+        "experiment_name": "Test Experiment 2",
+        "date": "2026-07-23",
+        "contrast": "unknown",
+        "file": "/workspaces/SPARTA-pipelining-SQL/de_quack_project/test_and_examples/data1.txt",
+        "normalization": "unknown",
+        "model": "unknown",
+        "annotation_version": "unknown"
+    }
+}
