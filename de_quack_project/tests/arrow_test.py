@@ -61,5 +61,8 @@ class TestArrow():
         
     def test_arrow_cleanup(self):
         os.remove('SQL.duckdb')
+        os.remove('genes.parquet')
+        os.remove('genes_metadata.json')
+        
     
 

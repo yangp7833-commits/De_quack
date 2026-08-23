@@ -37,7 +37,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-excel = ["openpyxl>=3.0"]
 plotting = ["matplotlib>=3.5.0"]
 
 [tool.setuptools.packages.find]

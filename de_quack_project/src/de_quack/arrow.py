@@ -390,35 +390,35 @@ class DeArrow:
     
 
     
-    def get_significant_genes(self, log2fc: float = 1, pvalue: float = 0.05, logCPM: float = 0) -> "DeArrow":
+    def get_significant_genes(self, log2fc: float = 1, padj: float = 0.05, logCPM: float = 1) -> "DeArrow":
         """
-        Gets all significant genes from the DeArrow object based on the provided log2fc, pvalue, and logCPM thresholds.
+        Gets all significant genes from the DeArrow object based on the provided log2fc, padj, and logCPM thresholds.
         """
         df = self._table.filter(
             (pl.col('log2fc').abs() >= log2fc) &
-            (pl.col('pvalue') <= pvalue) &
+            (pl.col('padj') <= padj) &
             (pl.col('logCPM') >= logCPM)
         )
         return self._from_arrow(df, self.experiment_metadata, self.id)
 
-    def get_downregulated(self, log2fc: float = 0, pvalue: float = 0.05, logCPM: float = 0) -> "DeArrow":
+    def get_downregulated(self, log2fc: float = -1, padj: float = 0.05, logCPM: float = 1) -> "DeArrow":
         """
-        Gets all downregulated genes from the DeArrow object based on the provided log2fc, pvalue, and logCPM thresholds.
+        Gets all downregulated genes from the DeArrow object based on the provided log2fc, padj, and logCPM thresholds.
         """
         df = self._table.filter(
             (pl.col('log2fc') <= log2fc) &
-            (pl.col('pvalue') <= pvalue) &
+            (pl.col('padj') <= padj) &
             (pl.col('logCPM') >= logCPM)
         )
         return self._from_arrow(df, self.experiment_metadata, self.id)
 
-    def get_upregulated(self, log2fc: float = 0, pvalue: float = 0.05, logCPM: float = 0) -> "DeArrow":
+    def get_upregulated(self, log2fc: float = 1, padj: float = 0.05, logCPM: float = 1) -> "DeArrow":
         """
-        Gets all upregulated genes from the DeArrow object based on the provided log2fc, pvalue, and logCPM thresholds.
+        Gets all upregulated genes from the DeArrow object based on the provided log2fc, padj, and logCPM thresholds.
         """
         frame = self._table.filter(
             (pl.col('log2fc') >= log2fc) &
-            (pl.col('pvalue') <= pvalue) &
+            (pl.col('padj') <= padj) &
             (pl.col('logCPM') >= logCPM)
         )
         return self._from_arrow(frame, self.experiment_metadata, self.id)
@@ -857,7 +857,7 @@ class DeArrows:
             return DeArrow._from_arrow(df, metadata, df_ids[0])
         return self._from_arrow(df, metadata, df_ids)
     
-    def get_significant_genes(self, log2fc: float = 1, padj: float = 0.05, logCPM: float = 0) -> "DeArrows":
+    def get_significant_genes(self, log2fc: float = 1, padj: float = 0.05, logCPM: float = 1) -> "DeArrows":
         df = self._table.filter(
             (pl.col('log2fc').abs() >= log2fc) &
             (pl.col('padj') <= padj) &
@@ -1064,7 +1064,6 @@ def _write_parquet(
         raise TypeError(f'output_path must be a string, not {type(output_path)}')
     if not output_path.endswith('.parquet'):
         raise ValueError(f'output_path must end with .parquet, not {output_path}')
-    print(df)
     df.write_parquet(output_path, compression=compression, compression_level=compression_level)
     metadata_path = output_path.replace('.parquet', '_metadata.json')
     if len(os.path.dirname(metadata_path)) > 0:
