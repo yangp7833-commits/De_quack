@@ -1003,7 +1003,7 @@ def _add_experiment_arrows(
 ) -> tuple[pl.DataFrame, ExperimentMetadataMap, list[ExperimentId]]:
     frame = data._table
     if new_id is not None:
-        check_ids(ids)
+        _check_ids(ids)
         if isinstance(new_id, list):
             if len(new_id) != len(data.id):
                 raise DeQuackError('Number of provided ids does not match number of existing ids')
@@ -1053,7 +1053,7 @@ def _write_parquet(
     df: pl.DataFrame,
     metadata: ExperimentMetadataMap,
     output_path: str,
-    compression: str = 'ztsd',
+    compression: str = 'zstd',
     compression_level: int = 3
 ) -> None:
     """

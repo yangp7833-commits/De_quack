@@ -382,7 +382,8 @@ class DeQuackling:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
         output_path = os.path.abspath(output_path)
         if experiment_id is None:
-            self.conn.execute(f"COPY (SELECT * FROM gene_results) TO '{output_path}' (FORMAT PARQUET)")
+            table = self.conn.table('gene_results')
+            table.write_parquet(output_path)
             metadata = self.conn.execute(f"SELECT * FROM experimental_data").fetchall()
             experiment_id = [n for n in range(1, len(metadata)+1)]
         elif isinstance(experiment_id, list):
@@ -391,16 +392,18 @@ class DeQuackling:
                     experiment_id[i] = int(experiment_id[i])
             except ValueError:
                 raise ValueError("All experiment IDs must be integers.")
-            self.conn.execute(f"COPY (SELECT * FROM gene_results WHERE experiment_id = ANY($1)) TO '{output_path}' (FORMAT PARQUET)", (experiment_id,))
+            table = self.conn.table('gene_results').filter(ColumnExpression('experiment_id').isin(*experiment_id))
+            print(table)
+            table.write_parquet(output_path)
             metadata = self.conn.execute(f"SELECT * FROM experimental_data WHERE experiment_id = ANY($1)", (experiment_id,)).fetchall()
         else:
             try:
                 experiment_id = int(experiment_id)
             except ValueError:
                 raise ValueError("Experiment ID must be an integer.")
-            self.conn.execute(f"COPY (SELECT * FROM gene_results WHERE experiment_id = $1) TO '{output_path}' (FORMAT PARQUET)", (experiment_id,))
-            metadata = self.conn.execute(f"SELECT * FROM experimental_data WHERE experiment_id = $1", (experiment_id,)).fetchall()
-            experiment_id = list(experiment_id)  # Convert to list for consistency
+            table = self.conn.table('gene_results').filter(ColumnExpression('experiment_id') == experiment_id)
+            table.write_parquet(output_path)
+            metadata = self.conn.execute(f"SELECT * FROM experimental_data WHERE experiment_id = ?", (experiment_id,)).fetchall()
         meta_list = [dict(zip(experiment_columns, row)) for row in metadata]
         meta_dict = _to_metadata(meta_list)
         meta_json = json.dumps(meta_dict, indent=4)
@@ -568,11 +571,10 @@ class DeQuackling:
             deleted_genes = self.conn.execute('SELECT COUNT(*) FROM gene_results WHERE experiment_id = ANY(?)', (ids,)).fetchone()[0]
             logger.info(f'Deleted {deleted_genes} gene result rows and {len(ids)} experiment metadata rows for experiment_id(s): {ids}.')
             logger.info(f'Deleted {len(ids)} experiment(s) with experiment_id(s): {ids}.')
+            self.conn.commit()
         except Exception as e:
             self.conn.rollback()
             raise DeQuackError(f"Failed to delete experiment(s): {e}") from e
-        finally:
-            self.conn.commit()
             
     
     def _polars_to_de_arrows(self, df: pl.DataFrame) -> "DeArrow | DeArrows":

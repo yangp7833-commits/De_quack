@@ -123,11 +123,11 @@ CORE_QUERIES = {
                                     LEFT JOIN genes g ON
                                         g.ensembl_id = df.ensembl_id 
                                     LEFT JOIN genes sym ON
-                                        g.symbol = df.gene_symbol OR
-                                        (g.prev_symbol IS NOT NULL AND df.gene_symbol IS NOT NULL AND
-                                        list_contains(g.prev_symbol, df.gene_symbol)) OR
-                                        (g.alias_symbol IS NOT NULL AND df.gene_symbol IS NOT NULL AND
-                                        list_contains(g.alias_symbol, df.gene_symbol))
+                                        sym.symbol = df.gene_symbol OR
+                                        (sym.prev_symbol IS NOT NULL AND df.gene_symbol IS NOT NULL AND
+                                        list_contains(sym.prev_symbol, df.gene_symbol)) OR
+                                        (sym.alias_symbol IS NOT NULL AND df.gene_symbol IS NOT NULL AND
+                                        list_contains(sym.alias_symbol, df.gene_symbol))
                                     WHERE
                                      $2 IS NULL OR g.species = $2 OR sym.species = $2
                                     ''',
