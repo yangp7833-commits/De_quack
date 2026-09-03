@@ -9,7 +9,7 @@ import hashlib
 import duckdb
 import polars as pl
 from typing import Sequence, TypeAlias
-from .core import DeQuackling
+from .core import DeQuackling, experiment_columns
 from .exceptions import DeQuackError, ProcessingError, DuplicateGeneTableError
 from .utilities import ExperimentMetadata, gene_columns,  CORE_QUERIES, _setup_logger
 logger = _setup_logger()
@@ -683,7 +683,6 @@ class DeArrows:
         species: str = 'human',
         keep_ids: bool = False,
     ) -> tuple[pl.DataFrame, ExperimentMetadataMap, list[ExperimentId]]:
-        experiment_columns=['experiment_id', 'model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization', 'extra_info']
         table = pl.DataFrame(schema = {'experiment_id': pl.Int32(), 'gene_symbol': pl.String(), 'ensembl_id': pl.String(), 'log2fc': pl.Float64(), 'logCPM': pl.Float64(), 'pvalue': pl.Float64(), 'padj': pl.Float64(), 'stat': pl.Float64(), 'other_info': pl.String()})
         frames = []
         meta_by_id = {}

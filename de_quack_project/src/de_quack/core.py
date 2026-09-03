@@ -32,7 +32,7 @@ import importlib
 core_queries = CORE_QUERIES
 experiment_columns=['experiment_id', 'model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization', 'other_info']
 
-ExperimentId: TypeAlias = int | str
+ExperimentId: TypeAlias = int
 ExperimentMetadataField: TypeAlias = str | int | float | bool | None | dict[str, object] | list[object]
 ExperimentMetadataRecord: TypeAlias = dict[str, ExperimentMetadataField]
 ExperimentMetadataMap: TypeAlias = dict[ExperimentId, ExperimentMetadataRecord]
@@ -45,9 +45,7 @@ _GENE_ALIAS_TO_COLUMN = {
 
 logger = _setup_logger()
 
-def _get_gene_table(species: str) -> object:
-    folder = importlib.resources.files('de_quack') / 'gene_tables'
-    return folder / f'{species}_genes.parquet'
+
 
 class DeQuackling:
     def __init__(self, db_path: str = 'SQL.duckdb') -> None:
@@ -87,7 +85,7 @@ class DeQuackling:
                             (experiment_id INTEGER PRIMARY KEY DEFAULT nextval('seq_experiment_id'), 
                              model VARCHAR, date VARCHAR, file VARCHAR, 
                              experiment_name VARCHAR, contrast VARCHAR, annotation_version VARCHAR, normalization VARCHAR, other_info VARCHAR, data_signature VARCHAR,
-                             duckDB_version VARCHAR, de_quack_version VARCHAR)''')
+                             duckdb_version VARCHAR, de_quack_version VARCHAR)''')
         
         
         
@@ -316,6 +314,7 @@ class DeQuackling:
 
         The data comes from the bundled mouse gene mapping query.
         """
+        from .arrow import _get_gene_table
         table_path = _get_gene_table('mouse')
         
        
@@ -335,7 +334,7 @@ class DeQuackling:
 
         The data comes from the bundled human gene mapping query.
         """
-
+        from .arrow import _get_gene_table
         table_path = _get_gene_table('human')
         try:
             self.conn.execute('INSERT INTO genes SELECT * FROM read_parquet(?)', (str(table_path),))
