@@ -505,7 +505,7 @@ class DeArrow:
                 raise DuplicateGeneTableError(f'Gene table for {species} already exists in database. Please use a different species or set initialize_gene_table to False')
         data_signature = hashlib.sha256(str(df).encode()).hexdigest()
         result = db.conn.execute(
-            "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature, duckDB_version, de_quack_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
+            "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature, duckdb_version, de_quack_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
             (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, data_signature, importlib.metadata.version('duckdb'), importlib.metadata.version('de_quack'))
         ).fetchall()
         db.conn.execute(_core_queries['insert_de_arrow'], (result[0][0], species))
@@ -927,7 +927,7 @@ class DeArrows:
                     other_info[key] = metadata_fields.pop(key)
             data_signature = hashlib.sha256(str(df).encode()).hexdigest()
             result = db.conn.execute(
-                "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature, duckDB_version, de_quack_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
+                "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature, duckdb_version, de_quack_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
                 (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, data_signature, importlib.metadata.version('duckdb'), importlib.metadata.version('de_quack'))
             ).fetchall()
             new_ids.append(result[0][0])
@@ -988,8 +988,9 @@ def _add_experiment_arrow(
         frame = frame.with_columns(pl.lit(experiment_id).alias('experiment_id'))
     df.extend(frame)
     experiment_id = experiment_id or data.id
-    new_metadata = {experiment_id: data.experiment_metadata[data.id]}
     new_ids = ids + [experiment_id]
+    _check_ids(new_ids)
+    new_metadata = {experiment_id: data.experiment_metadata[data.id]}
     meta.update(new_metadata)
     return (df, meta, new_ids)
 
@@ -998,22 +999,25 @@ def _add_experiment_arrows(
     meta: ExperimentMetadataMap,
     ids: list[ExperimentId],
     data: DeArrows,
-    new_id: ExperimentId | list[ExperimentId] | None = None,
+    experiment_id: list[ExperimentId] | None = None,
 ) -> tuple[pl.DataFrame, ExperimentMetadataMap, list[ExperimentId]]:
     frame = data._table
-    if new_id is not None:
+    if experiment_id is not None:
+        if not isinstance(experiment_id, list):
+            raise DeQuackError(f'experiment_id must be a list when adding DeArrows, not {type(experiment_id)}')
         _check_ids(ids)
-        if isinstance(new_id, list):
-            if len(new_id) != len(data.id):
+        if isinstance(experiment_id, list):
+            if len(experiment_id) != len(data.id):
                 raise DeQuackError('Number of provided ids does not match number of existing ids')
-            id_dict = dict(zip(data.id, new_id))
+            id_dict = dict(zip(data.id, experiment_id))
             frame = frame.with_columns(pl.col('experiment_id').replace(id_dict).alias('experiment_id'))
-            new_metadata = {n: value for n, value in zip(new_id, data.experiment_metadata.values())}
+            new_metadata = {n: value for n, value in zip(experiment_id, data.experiment_metadata.values())}
     else:
         new_metadata = data.experiment_metadata
     df = df.extend(frame)
-    new_id = new_id or data.id
+    new_id = experiment_id or data.id
     new_ids = ids + new_id
+    _check_ids(new_ids)
     meta.update(new_metadata)
     return (df, meta, new_ids)
 

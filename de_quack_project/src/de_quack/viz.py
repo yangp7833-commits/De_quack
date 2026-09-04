@@ -69,7 +69,7 @@ def volcano_plot(df: object, padj: float = 0.05, log2fc: float = 1, title=None, 
        
 
     if file:
-        if not os.path.exists(os.path.abspath(file)):
+        if not os.path.exists(os.path.dirname(os.path.abspath(file))):
             os.makedirs(os.path.dirname(os.path.abspath(file)), exist_ok=True)
         fig.savefig(file, bbox_inches='tight', dpi=300)
     if show:

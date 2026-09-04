@@ -362,7 +362,7 @@ class DeQuackling:
                 f'Data is identical to data in experiment id: {duplicate_ids[0][0]}. Duplicate experiments are not allowed.'
             )
         result = self.conn.execute(
-            "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature, duckDB_version, de_quack_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
+            "INSERT INTO experimental_data (model, date, file, experiment_name, contrast, annotation_version, normalization, other_info, data_signature, duckdb_version, de_quack_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING experiment_id",
             (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, data_signature, importlib.metadata.version('duckdb'), importlib.metadata.version('de_quack'))
         ).fetchall()
         self.conn.commit()
@@ -392,7 +392,6 @@ class DeQuackling:
             except ValueError:
                 raise ValueError("All experiment IDs must be integers.")
             table = self.conn.table('gene_results').filter(ColumnExpression('experiment_id').isin(*experiment_id))
-            print(table)
             table.write_parquet(output_path)
             metadata = self.conn.execute(f"SELECT * FROM experimental_data WHERE experiment_id = ANY($1)", (experiment_id,)).fetchall()
         else:
@@ -565,9 +564,9 @@ class DeQuackling:
             self.conn.begin()
             ids = self.conn.execute(core_queries['find_delete_experiment'], (experiment_id, date, model, file, name, contrast, annotation_version, normalization)).fetchall()
             ids = [row[0] for row in ids]
+            deleted_genes = self.conn.execute('SELECT COUNT(*) FROM gene_results WHERE experiment_id = ANY(?)', (ids,)).fetchone()[0]
             self.conn.execute(core_queries['delete_gene_results'], (ids,))
             self.conn.execute(core_queries['delete_experiment'], (ids,))
-            deleted_genes = self.conn.execute('SELECT COUNT(*) FROM gene_results WHERE experiment_id = ANY(?)', (ids,)).fetchone()[0]
             logger.info(f'Deleted {deleted_genes} gene result rows and {len(ids)} experiment metadata rows for experiment_id(s): {ids}.')
             logger.info(f'Deleted {len(ids)} experiment(s) with experiment_id(s): {ids}.')
             self.conn.commit()

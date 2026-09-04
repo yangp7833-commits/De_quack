@@ -30,9 +30,14 @@ class TestArrow():
         arrow = DeArrow('data.txt', metadata = {'experiment_name': 'Test Experiment'}, heal_genes = True)
         arrows = arrow.add_experiment('data1.txt', metadata = {'experiment_name': 'Test Experiment 2'}, experiment_id = 3)
         arrows2 = arrows.add_experiment('data.txt', metadata = {'experiment_name': 'Test Experiment 3'}, experiment_id = 4)
+        arrows3 = arrows2.add_experiment(arrows, metadata = {'experiment_name': 'Test Experiment 4'}, experiment_id = [7, 8])
+        arrows4 = arrows3.add_experiment(arrow, experiment_id = 10)
         assert arrows._table.height > 0
         assert arrows.get_gene('PTEN').height > 0 and arrows.get_gene(ensembl_id = 'ENSMUSG00000000017').height > 0
         assert arrows.id == [1, 3]
+        assert arrows2.id == [1, 3, 4]
+        assert arrows3.id == [1, 3, 4, 7, 8]
+        assert arrows4.id == [1, 3, 4, 7, 8, 10]
     
     def test_arrows_set_id(self):
         arrows = DeArrows('data.txt', 'data1.txt', metadata = [{'experiment_name': 'Test Experiment'}, {'experiment_name': 'Test Experiment 2'}])
