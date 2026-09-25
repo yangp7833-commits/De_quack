@@ -16,5 +16,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: paper
-          path: path: |
+          path: |
             **/*.pdf
