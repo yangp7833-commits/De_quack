@@ -3,7 +3,7 @@ on: [push]
 jobs:
   paper:
     runs-on: ubuntu-latest
-    name: Paper Draft
+    name: statement_of_need
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -11,9 +11,9 @@ jobs:
         uses: openjournals/openjournals-draft-action@master
         with:
           journal: joss
-          paper-path: paper.md
+          paper-path: de_quack_project/Statement_of_need.md
       - name: Upload PDF artifact
         uses: actions/upload-artifact@v4
         with:
           name: paper
-          path: paper.pdf
+          path: statement_of_need.pdf
