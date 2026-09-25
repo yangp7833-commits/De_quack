@@ -16,4 +16,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: paper
-          path: statement_of_need.pdf
+          path: de_quack_project/Statement_of_need.pdf
