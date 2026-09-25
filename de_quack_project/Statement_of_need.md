@@ -1,3 +1,28 @@
+---
+title: 'de_quack: A Python library for storage, harmonization, and querying of differential gene expression results'
+tags:
+  - Python
+  - bioinformatics
+  - RNA-seq
+  - differential expression
+  - DuckDB
+authors:
+  - name: Tiger Xing
+    orcid: 0009-0005-9181-7431
+    affiliation: 1
+affiliations:
+  - name: Independent Researcher
+    index: 1
+date: 23 September 2026
+bibliography: paper.bib
+---
+
+# Summary
+
+de_quack is a Python library that harmonizes, stores, and queries differential gene expression (DGE) results produced by tools such as DESeq2, edgeR, and limma. It automatically reconciles inconsistent column-naming conventions across tools, resolves gene identifiers against reference nomenclature, and tracks experiment metadata for reproducibility — implemented using DuckDB and Polars for fast, file-based storage.
+
+## Statement of Need
+
 Differential gene expression (DGE) analysis of RNA-seq data is a widely used method for evaluating gene expression differences across conditions [@rosati2024dgereview]. 
 Tools such as DESeq2 [@love2014deseq2], limma [@ritchie2015limma], and edgeR [@robinson2009edger] are well-established for this analysis, but 
 their output consists of individual tables with inconsistent column naming conventions across tools, leaving data organization, cross-tool comparison, and long-term storage entirely to the user. 
@@ -17,6 +42,8 @@ like a native polars DataFrame while preserving provenance through any transform
 de_quack is designed primarily for individual researchers, graduate students, and postdoctoral bioinformaticians managing DGE results across experiments and analysis tools, prioritizing 
 zero-configuration setup and convenience over the scalability of larger, distributed data systems. Even so, the core capability of harmonizing and comparing DE results across tools and experiments 
 is broadly useful wherever DGE data accumulates, regardless of project scale.
+
+# References
 
 
 
