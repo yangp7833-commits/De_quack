@@ -327,6 +327,10 @@ with DeQuackling("results.duckdb") as db:
 ```bash
 pytest -v tests/ #specify the file if you wish to run only one test
 ```
+## AI Disclosure
+
+AI was used for assistance in the development of this library. Specifically, Github copilot was used to autocomplete and correct code, and Claude was used to review code before commits. However, Claude did not write code for this project.
+
 ## License
 
 MIT
