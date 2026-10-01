@@ -23,7 +23,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install package and dev dependencies
         run: |
-          pip install -e
+          pip install -e .
           pip install pytest ruff
       - name: Lint with ruff
         run: ruff check .
