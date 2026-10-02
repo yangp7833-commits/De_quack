@@ -50,7 +50,8 @@ helps to know what problem you're trying to solve.
 
 ## Code style
 
-No code style is enforced at this time.
+Ruff is used for linting and formatting. Run `ruff check .` to see
+any issues, and `ruff check . --fix` to automatically fix them.
 
 ## Questions
 
