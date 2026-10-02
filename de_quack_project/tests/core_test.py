@@ -11,8 +11,8 @@ class TestCore:
         with DeQuackling() as db:
             db.initialize_gene_table('human')
             db.initialize_gene_table('mouse')
-            db.ingest('data.txt', metadata = {'experiment_name': 'Test Experiment', 'description': 'This is a test experiment.'}, species = 'human', columns = {'log2FoldChange': 'log2fc'})
-            db.ingest('data1.txt', metadata = {'experiment_name': 'Test Experiment 2', 'description': 'This is another test experiment.'}, species = 'mouse', columns = {'log2FoldChange': 'log2fc'})
+            db.ingest('tests/data.txt', metadata = {'experiment_name': 'Test Experiment', 'description': 'This is a test experiment.'}, species = 'human', columns = {'log2FoldChange': 'log2fc'})
+            db.ingest('tests/data1.txt', metadata = {'experiment_name': 'Test Experiment 2', 'description': 'This is another test experiment.'}, species = 'mouse', columns = {'log2FoldChange': 'log2fc'})
             assert db.get_gene('AKT1').height > 0 and db.get_gene(ensembl_id = 'ENSMUSG00000000017').height > 0
     
     def test_queries(self):
