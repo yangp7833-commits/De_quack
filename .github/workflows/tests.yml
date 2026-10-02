@@ -24,6 +24,7 @@ jobs:
       - name: Install package and dev dependencies
         run: |
           pip install -e .
+          pip install -e ".[plotting]"
           pip install pytest ruff
       - name: Lint with ruff
         run: ruff check .
