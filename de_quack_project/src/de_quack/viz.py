@@ -1,11 +1,15 @@
 
-import re
 import os
-from .exceptions import ProcessingError
-from .arrow import DeArrow, DeArrows, _to_polars_table, _order_columns
+from typing import TYPE_CHECKING
+
 import polars as pl
 
-def volcano_plot(df: object, padj: float = 0.05, log2fc: float = 1, title=None, show=False, label_genes = 0, label_type = 'ensembl_id', insignificant_color='grey', upregulated_color='red', downregulated_color='blue', file: str | None = None, **labeling_kwargs) -> 'matplotlib.figure.Figure':
+from .arrow import DeArrow, DeArrows, _order_columns, _to_polars_table
+
+if TYPE_CHECKING:
+    import matplotlib.pyplot as plt
+
+def volcano_plot(df: object, padj: float = 0.05, log2fc: float = 1, title=None, show=False, label_genes = 0, label_type = 'ensembl_id', insignificant_color='grey', upregulated_color='red', downregulated_color='blue', file: str | None = None, **labeling_kwargs) -> "plt.Figure":
     """ 
         Make a volcano plot from a DeArrow or DeArrows or polars or pandas DataFrame. The DataFrame must contain the columns 'log2fc' and 'padj'.
         The cutoffs for significance can be specified using the padj and log2fc parameters. The default values are 0.05 for padj and 1 for log2fc.
@@ -23,10 +27,10 @@ def volcano_plot(df: object, padj: float = 0.05, log2fc: float = 1, title=None, 
         'fontweight': 'normal',
         'fontname': 'sans-serif',
         }
-    wrong_keys = [key for key in labeling_kwargs.keys() if key not in defaults.keys()]
+    wrong_keys = [key for key in labeling_kwargs if key not in defaults]
     if wrong_keys:
         raise ValueError(f"Invalid arguments provided: {', '.join(wrong_keys)}. Valid arguments are: {', '.join(defaults.keys())}.")
-    for key in [k for k in defaults.keys() if k not in labeling_kwargs.keys()]:
+    for key in [k for k in defaults if k not in labeling_kwargs]:
         labeling_kwargs[key] = defaults[key]
     try:
         import matplotlib.pyplot as plt

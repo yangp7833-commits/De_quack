@@ -1,13 +1,16 @@
-from dataclasses import dataclass, field, fields, asdict
-import difflib
-import re
-import os
-from pathlib import Path
 import datetime
-from .exceptions import ProcessingError
-import warnings
-import logging
+import difflib
 import json
+import logging
+import os
+import re
+from dataclasses import dataclass, field, fields
+from datetime import timezone
+from pathlib import Path
+
+import polars as pl
+
+from .exceptions import ProcessingError
 
 _DATE_PATTERN = re.compile(r'(\d{4}-\d{2}-\d{2})')
 
@@ -193,22 +196,22 @@ def _find_date_and_file(info):
     if isinstance(info, str):
         info=os.path.abspath(info)
     else:
-        return datetime.datetime.now().strftime('%Y-%m-%d'), 'in-memory object'
+        return datetime.datetime.now(tz = timezone.utc).strftime('%Y-%m-%d'), 'in-memory object'
 
     if os.path.isfile(info):
         match = _DATE_PATTERN.search(info) # first tries to find the date using regex on the file name
         file_path=os.path.abspath(info)
         if match:
-            return datetime.datetime.strptime(match.group(1), '%Y-%m-%d'), file_path
+            return datetime.datetime.strptime(match.group(1), '%Y-%m-%d %z'), file_path
         else: # if the search doesn't work, then uses the path library to find the time, or else uses none
             path=Path(file_path)
             if path.stat().st_mtime:
-                return datetime.datetime.fromtimestamp(path.stat().st_mtime).strftime('%Y-%m-%d'), file_path
+                return datetime.datetime.fromtimestamp(path.stat().st_mtime, tz = timezone.utc).strftime('%Y-%m-%d'), file_path
             else:
-                return datetime.datetime.now().strftime('%Y-%m-%d'), file_path
+                return datetime.datetime.now(tz = timezone.utc).strftime('%Y-%m-%d'), file_path
 
 def _process_metadata(metadata: object):
-    if isinstance(metadata, dict) or isinstance(metadata, list):
+    if isinstance(metadata, (dict, list)):
         return metadata
     
     import polars as pl
@@ -284,7 +287,7 @@ class ExperimentMetadata:
             core_dict['date'] = self.date
         else:
             try:
-                core_dict['date'] = datetime.datetime.strptime(core_dict['date'], '%Y-%m-%d').strftime('%Y-%m-%d')
+                core_dict['date'] = datetime.datetime.strptime(core_dict['date'], '%Y-%m-%d %z').strftime('%Y-%m-%d')
             except ValueError:
                 _warn(f"Provided date '{core_dict['date']}' is not in the correct format (YYYY-MM-DD). Defaulting to current date.")
                 self.date, _ = _find_date_and_file(info)

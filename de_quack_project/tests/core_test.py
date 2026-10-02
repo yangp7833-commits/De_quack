@@ -1,7 +1,10 @@
-from de_quack import DeQuackling
+#!/usr/bin/env python3
 import os
 
-class TestCore():
+from de_quack import DeQuackling
+
+
+class TestCore:
         
 
     def test_ingestion(self):

@@ -47,7 +47,7 @@ The library accepts many table-like objects and file paths:
 - Excel files (xlsx) 
 - `DeArrow` and `DeArrows` objects
 
-With version 2.1, the library now supports CSV, TSV, and JSON files for metadata input along with Polars and pandas Dataframes. 
+With version 2.0.1, the library now supports CSV, TSV, and JSON files for metadata input along with Polars and pandas Dataframes. 
 
 Note: Although these input types are supported, they are detected by first trying an import of the relevant library and then checking the type of the object. Therefore, even though Pandas is supported, it is not a dependency.
 ## Core data model

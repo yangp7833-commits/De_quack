@@ -13,22 +13,37 @@ Workflow summary (high level):
 2. Use `ingest()` to normalize and insert a DataFrame (preprocess_df).
 3. Use helper methods like `get_experiment()`, `get_gene()`, `get_upregulated()`, etc. to query data.
 """
-import duckdb
-from duckdb import SQLExpression, CaseExpression, ColumnExpression, ConstantExpression, FunctionExpression
-import re
-import os
-import json
-import uuid
-from pathlib import Path
-import hashlib
-import difflib
 import datetime
-import polars as pl
-from typing import TypeAlias
-from .exceptions import ProcessingError, DuplicateExperimentError, DuplicateGeneTableError, DeQuackError
-from .utilities import gene_columns, ExperimentMetadata, CORE_QUERIES, _setup_logger, _try_process_metadata
-import time
+import difflib
 import importlib
+import json
+import os
+import re
+from typing import TYPE_CHECKING, TypeAlias
+
+import duckdb
+import polars as pl
+from duckdb import (
+    ColumnExpression,
+    ConstantExpression,
+    FunctionExpression,
+    SQLExpression,
+)
+
+from .exceptions import (
+    DeQuackError,
+    DuplicateExperimentError,
+    DuplicateGeneTableError,
+    ProcessingError,
+)
+from .utilities import (
+    CORE_QUERIES,
+    ExperimentMetadata,
+    _setup_logger,
+    _try_process_metadata,
+    gene_columns,
+)
+
 core_queries = CORE_QUERIES
 experiment_columns=['experiment_id', 'model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization', 'other_info']
 
@@ -44,6 +59,9 @@ _GENE_ALIAS_TO_COLUMN = {
     for alias in aliases + [canonical]
 }
 
+if TYPE_CHECKING:
+    from .arrow import DeArrow, DeArrows
+    
 logger = _setup_logger()
 
 #make excel sheet parsing
@@ -62,7 +80,7 @@ class DeQuackling:
         
         
         
-    def __enter__(self) -> "DeQuackling":
+    def __enter__(self):
         """Open the DuckDB connection and create the required schema if needed.
 
         The core tables are `experimental_data`, `gene_results`, and `genes`.
@@ -260,9 +278,7 @@ class DeQuackling:
                 self.conn.read_parquet(info).create_view('preprocessed_data')
                 return
             elif info.lower().endswith('xls') or info.lower().endswith('xlsx'):
-                try:
-                    import openpyxl
-                except ImportError:
+                if not importlib.util.find_spec('openpyxl', package=None):	
                     raise ImportError('openpyxl is required to read Excel files. Please install it with `pip install openpyxl`.')
                 self.conn.execute('DROP VIEW IF EXISTS preprocessed_data')
                 df = pl.read_excel(info, sheet_name=0)
@@ -279,7 +295,7 @@ class DeQuackling:
 
         self.conn.execute('DROP VIEW IF EXISTS preprocessed_data')
         from .arrow import DeArrow, DeArrows
-        if isinstance(info, DeArrow) or isinstance(info, DeArrows):
+        if isinstance(info, (DeArrow, DeArrows)):
             self.conn.register('info', info._table)
             self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
             return
@@ -395,7 +411,7 @@ class DeQuackling:
         if experiment_id is None:
             table = self.conn.table('gene_results')
             table.write_parquet(output_path)
-            metadata = self.conn.execute(f"SELECT * FROM experimental_data").fetchall()
+            metadata = self.conn.execute("SELECT * FROM experimental_data").fetchall()
             experiment_id = [n for n in range(1, len(metadata)+1)]
         elif isinstance(experiment_id, list):
             try:
@@ -405,7 +421,7 @@ class DeQuackling:
                 raise ValueError("All experiment IDs must be integers.")
             table = self.conn.table('gene_results').filter(ColumnExpression('experiment_id').isin(*experiment_id))
             table.write_parquet(output_path)
-            metadata = self.conn.execute(f"SELECT * FROM experimental_data WHERE experiment_id = ANY($1)", (experiment_id,)).fetchall()
+            metadata = self.conn.execute("SELECT * FROM experimental_data WHERE experiment_id = ANY($1)", (experiment_id,)).fetchall()
         else:
             try:
                 experiment_id = int(experiment_id)
@@ -413,7 +429,7 @@ class DeQuackling:
                 raise ValueError("Experiment ID must be an integer.")
             table = self.conn.table('gene_results').filter(ColumnExpression('experiment_id') == experiment_id)
             table.write_parquet(output_path)
-            metadata = self.conn.execute(f"SELECT * FROM experimental_data WHERE experiment_id = ?", (experiment_id,)).fetchall()
+            metadata = self.conn.execute("SELECT * FROM experimental_data WHERE experiment_id = ?", (experiment_id,)).fetchall()
         meta_list = [dict(zip(experiment_columns, row)) for row in metadata]
         meta_dict = _to_metadata(meta_list)
         meta_json = json.dumps(meta_dict, indent=4)
@@ -527,7 +543,7 @@ class DeQuackling:
     ) -> "DeArrow | DeArrows":
         """Return experiments matching the provided metadata filters."""
         try:
-            date = datetime.datetime.strptime(date, '%Y-%m-%d').date() if date else None
+            date = datetime.datetime.strptime(date, '%Y-%m-%d %z').date() if date else None
         except ValueError:
             raise ProcessingError(f"Invalid date format: {date}. Expected format is YYYY-MM-DD.")
         rel = self.conn.execute(core_queries['get_experiment'], [experiment_id, date, model, file, name, contrast, annotation_version, normalization]).fetchall()
@@ -573,7 +589,7 @@ class DeQuackling:
     ) -> None:
         """Delete experiments and their gene-result rows for the matching filters."""
         try:
-            date = datetime.datetime.strptime(date, '%Y-%m-%d').date() if date else None
+            date = datetime.datetime.strptime(date, '%Y-%m-%d %z').date() if date else None
         except ValueError:
             raise ProcessingError(f"Invalid date format: {date}. Expected format is YYYY-MM-DD.")
         try:

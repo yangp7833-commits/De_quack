@@ -1,6 +1,11 @@
-from de_quack import DeArrow, DeArrows, volcano_plot
+#!/usr/bin/env python3
+from de_quack import DeArrow, volcano_plot
+
 
 def test_volcano_plot():
     arrow = DeArrow('data.txt', metadata = {'experiment_name': 'Test Experiment'}, heal_genes = True, species = 'human')
     plt = volcano_plot(arrow, title='Volcano Plot', label_genes = 5, color = 'black', label_type = 'ensembl_id', show=False)
     plt2 = volcano_plot('data1.txt', title='Volcano Plot 2', label_genes = 5, color = 'black', label_type = 'ensembl_id', show=False)
+    assert plt
+    assert plt2
+    

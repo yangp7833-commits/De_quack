@@ -2,18 +2,23 @@
 
 __version__ = "0.1.2"
 
-from .core import DeQuackling
-from .viz import volcano_plot
-from .exceptions import DeQuackError, ProcessingError, DuplicateExperimentError, DuplicateGeneTableError
 from .arrow import DeArrow, DeArrows
+from .core import DeQuackling
+from .exceptions import (
+    DeQuackError,
+    DuplicateExperimentError,
+    DuplicateGeneTableError,
+    ProcessingError,
+)
+from .viz import volcano_plot
 
 __all__ = [
-    "DeQuackling",
-    "volcano_plot",
-    "DeQuackError",
-    "ProcessingError",
-    "DuplicateExperimentError",
-    "DuplicateGeneTableError",
     "DeArrow",
     "DeArrows",
+    "DeQuackError",
+    "DeQuackling",
+    "DuplicateExperimentError",
+    "DuplicateGeneTableError",
+    "ProcessingError",
+    "volcano_plot",
 ]

@@ -1,8 +1,10 @@
-from de_quack import DeArrow, DeArrows, DeQuackling
-import pytest
+#!/usr/bin/env python3
 import os
 
-class TestArrow():
+from de_quack import DeArrow, DeArrows, DeQuackling
+
+
+class TestArrow:
     def test_arrow_creation(self):
         arrow_human = DeArrow('data.txt', metadata = {'experiment_name': 'Test Experiment'}, heal_genes = True, species = 'human')
         arrow_mouse = DeArrow('data1.txt', metadata = {'experiment_name': 'Test Experiment 2'})

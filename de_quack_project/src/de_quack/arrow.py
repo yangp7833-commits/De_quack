@@ -1,17 +1,25 @@
+import hashlib
+import importlib
 import json
 import os
 import re
-import time
 import uuid
+from collections.abc import Sequence
 from importlib import resources
-import importlib
-import hashlib
-import duckdb
+from typing import TypeAlias
+
 import polars as pl
-from typing import Sequence, TypeAlias
-from .core import DeQuackling, experiment_columns
-from .exceptions import DeQuackError, ProcessingError, DuplicateGeneTableError
-from .utilities import ExperimentMetadata, gene_columns,  CORE_QUERIES, _setup_logger, _try_process_metadata
+
+from .core import DeQuackling
+from .exceptions import DeQuackError, DuplicateGeneTableError, ProcessingError
+from .utilities import (
+    CORE_QUERIES,
+    ExperimentMetadata,
+    _setup_logger,
+    _try_process_metadata,
+    gene_columns,
+)
+
 logger = _setup_logger()
 
 
@@ -75,16 +83,11 @@ def _to_polars_table(table: object, ignore_errors: bool = False) -> pl.DataFrame
         if path.lower().endswith('.parquet'):
             return pl.read_parquet(path)
         if path.lower().endswith('xls') or path.lower().endswith('xlsx'):
-            try:
-                import openpyxl
-            except ImportError:
+            if not importlib.util.find_spec('openpyxl', package=None):	
                 raise ImportError('openpyxl is required to read Excel files. Please install it with `pip install openpyxl`.')
             return pl.read_excel(path, sheet_name=0)
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                first_line = f.readline()
-        except Exception as e:
-            raise ProcessingError(f"Error occurred while reading the file: {e}")
+        with open(path, 'r', encoding='utf-8') as f:
+            first_line = f.readline()
         separator = '\t' if '\t' in first_line else (';' if ';' in first_line else ',')
         return pl.read_csv(path, separator=separator, null_values = ['', 'NA', 'NaN', 'nan'], truncate_ragged_lines=ignore_errors, quote_char = None)
 
@@ -177,7 +180,7 @@ def _order_columns(df: object, columns: dict[str, str] | None = None) -> pl.Data
         if column.lower() in _GENE_ALIAS_TO_COLUMN and column != 'experiment_id'
     }
     for key, value in columns.items():
-        if key in df.columns and key not in rename_map.keys():
+        if key in df.columns and key not in rename_map:
             if value not in gene_columns:
                 raise DeQuackError(f'Column {value} is not a valid gene column')
             rename_map[key] = value
@@ -308,10 +311,7 @@ class DeArrow:
         Convert a table-like object and metadata into a DeArrow-compatible polars DataFrame and metadata map.
         First converts metadata into an ExperimentMetadata object, then converts the table-like object into a polars DataFrame, orders the columns, heals gene identifiers if specified, and returns the cleaned DataFrame along with the metadata map.
         """
-        try:
-            df = _to_polars_table(info, ignore_errors=ignore_errors)
-        except Exception as e:
-            raise ProcessingError(f"Error occurred while converting info to polars table: {e}")
+        df = _to_polars_table(info, ignore_errors=ignore_errors)
         metadata_fields, other_info=ExperimentMetadata().to_dict(metadata, info)
         for key, value in json.loads(other_info).items():
             metadata_fields[key]=value
@@ -518,7 +518,7 @@ class DeArrow:
         )        
         metadata_fields = self.experiment_metadata[self.id]
         other_info = {}
-        for key in metadata_fields.keys():
+        for key in metadata_fields:
             if key not in ['model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization']:
                 other_info[key] = metadata_fields.pop(key)
         db = DeQuackling(file).connect()
@@ -569,11 +569,8 @@ class DeArrows:
         if metadata is None:
             return super().__new__(cls)
         _try_process_metadata(metadata)
-        if len(metadata) != len(args):
-            if len(args) == 1 and isinstance(metadata, dict):
-                return DeArrow(args[0], metadata=metadata)
-        if len(args) == 1:
-            return DeArrow(args[0], metadata=metadata[0])
+        if len(metadata) != len(args) and len(args) == 1 and isinstance(metadata, list): 
+            return DeArrow(args[0], metadata=metadata)
         return super().__new__(cls)
     
     def __init__(
@@ -707,7 +704,7 @@ class DeArrows:
     def _from_tables(
         cls,
         *args: object,
-        columns: dict[str, str] | None = {},
+        columns: dict[str, str] | None = None,
         metadata: list[ExperimentMetadataRecord] | None = None,
         ids: list[ExperimentId] | None = None,
         heal_genes: bool = False,
@@ -716,6 +713,7 @@ class DeArrows:
         ignore_errors: bool = False,
     ) -> tuple[pl.DataFrame, ExperimentMetadataMap, list[ExperimentId]]:
         table = pl.DataFrame(schema = {'experiment_id': pl.Int32(), 'gene_symbol': pl.String(), 'ensembl_id': pl.String(), 'log2fc': pl.Float64(), 'logCPM': pl.Float64(), 'pvalue': pl.Float64(), 'padj': pl.Float64(), 'stat': pl.Float64(), 'other_info': pl.String()})
+        columns = columns or {}
         frames = []
         meta_by_id = {}
         flat_ids = []
@@ -739,10 +737,7 @@ class DeArrows:
                     meta_by_id[new_id] = arg.experiment_metadata[old_id]
             else:
                 new_id = next(ids_iter)
-                try:
-                    arg = _to_polars_table(arg, ignore_errors=ignore_errors)
-                except Exception as e:
-                    raise ProcessingError(f"Error occurred while converting info to polars table: {e}")
+                arg = _to_polars_table(arg, ignore_errors=ignore_errors)
                 arg = _order_columns(arg, columns)
                 if 'experiment_id' in arg.columns:
                     arg = arg.drop('experiment_id')
@@ -957,7 +952,7 @@ class DeArrows:
         for experiment_id in old_ids:        
             metadata_fields = self.experiment_metadata[experiment_id]
             other_info = {}
-            for key in metadata_fields.keys():
+            for key in metadata_fields:
                 if key not in ['model', 'date', 'file', 'experiment_name', 'contrast', 'annotation_version', 'normalization']:
                     other_info[key] = metadata_fields.pop(key)
             data_signature = hashlib.sha256(str(df).encode()).hexdigest()
@@ -966,7 +961,7 @@ class DeArrows:
                 (metadata_fields.get('model'), metadata_fields.get('date'), metadata_fields.get('file'), metadata_fields.get('experiment_name'), metadata_fields.get('contrast'), metadata_fields.get('annotation_version'), metadata_fields.get('normalization'), other_info, data_signature, importlib.metadata.version('duckdb'), importlib.metadata.version('de_quack'))
             ).fetchall()
             new_ids.append(result[0][0])
-        id_map = pl.DataFrame({'old_id': old_ids, 'new_id': new_ids}, schema = {'old_id': pl.Int32(), 'new_id': pl.Int32()})
+        id_map = pl.DataFrame({'old_id': old_ids, 'new_id': new_ids}, schema = {'old_id': pl.Int32(), 'new_id': pl.Int32()}) # noqa: F841
         if initialize_gene_table == True:
             species = species or 'human'
             try:
@@ -1105,9 +1100,8 @@ def _write_parquet(
         raise ValueError(f'output_path must end with .parquet, not {output_path}')
     df.write_parquet(output_path, compression=compression, compression_level=compression_level)
     metadata_path = output_path.replace('.parquet', '_metadata.json')
-    if len(os.path.dirname(metadata_path)) > 0:
-        if not os.path.exists(os.path.dirname(metadata_path)):
-            os.makedirs(os.path.dirname(metadata_path))
+    if len(os.path.dirname(metadata_path)) > 0 and not os.path.exists(os.path.dirname(metadata_path)):
+        os.makedirs(os.path.dirname(metadata_path))
     with open(metadata_path, 'w') as f:
         json.dump(metadata, f, indent=4)
     logger.info(f'Wrote DeArrows object to {output_path} and metadata to {metadata_path}')
