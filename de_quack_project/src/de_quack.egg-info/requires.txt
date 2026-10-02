@@ -1,5 +1,6 @@
 duckdb>=1.0
 polars>=1.0
+pyarrow>=1.0
 
 [plotting]
 matplotlib>=3.5.0

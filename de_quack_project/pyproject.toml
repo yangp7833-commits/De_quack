@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "de_quack"
-version = "2.0.1"
+version = "2.0.2"
 description = "Python library for differential expression data storage and visualization using DuckDB."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,7 @@ classifiers = [
 dependencies = [
   "duckdb>=1.0",
   "polars>=1.0",
+  "pyarrow>=1.0"
 ]
 
 [project.optional-dependencies]

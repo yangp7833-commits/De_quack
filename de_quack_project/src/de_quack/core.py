@@ -314,14 +314,11 @@ class DeQuackling:
         except ImportError:
             pass
 
-        try:
-            import pyarrow as pa
-            if isinstance(info, pa.Table):
-                self.conn.register('info', info)
-                self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
-                return
-        except ImportError:
-            pass
+        import pyarrow as pa
+        if isinstance(info, pa.Table):
+            self.conn.register('info', info)
+            self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
+            return
 
         raise ProcessingError(f'type {type(info)} is not supported. Provide a pandas DataFrame, DuckDB relation, de_arrow object, or path to a CSV/TSV/Parquet file.')
     

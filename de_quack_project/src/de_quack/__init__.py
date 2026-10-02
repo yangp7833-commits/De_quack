@@ -1,6 +1,6 @@
 """de_quack package initializer."""
 
-__version__ = "0.1.2"
+__version__ = "2.0.2"
 
 from .arrow import DeArrow, DeArrows
 from .core import DeQuackling

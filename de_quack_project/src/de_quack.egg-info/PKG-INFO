@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: de_quack
-Version: 2.0.1
+Version: 2.0.2
 Summary: Python library for differential expression data storage and visualization using DuckDB.
 Author: yangp7833-commits
 License: MIT
@@ -21,6 +21,7 @@ Description-Content-Type: text/markdown
 License-File: LICENSE
 Requires-Dist: duckdb>=1.0
 Requires-Dist: polars>=1.0
+Requires-Dist: pyarrow>=1.0
 Provides-Extra: plotting
 Requires-Dist: matplotlib>=3.5.0; extra == "plotting"
 Dynamic: license-file
@@ -354,6 +355,10 @@ with DeQuackling("results.duckdb") as db:
 ```bash
 pytest -v tests/ #specify the file if you wish to run only one test
 ```
+## AI Disclosure
+
+AI was used for assistance in the development of this library. Specifically, Github copilot was used to autocomplete and correct code, and Claude was used to review code before commits. However, Claude did not write code for this project.
+
 ## License
 
 MIT
